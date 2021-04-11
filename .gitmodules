@@ -1,0 +1,6 @@
+[submodule "stream_v2/examples/third_party/compression"]
+	path = stream_v2/examples/third_party/compression
+	url = https://github.com/dectris/compression
+[submodule "stream_v2/examples/third_party/tinycbor"]
+	path = stream_v2/examples/third_party/tinycbor
+	url = https://github.com/intel/tinycbor

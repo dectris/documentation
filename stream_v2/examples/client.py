@@ -65,8 +65,8 @@ def decompress_channel_data(channel):
 
     compression = channel["compression"]
     data_type = channel["data_type"]
-    dtype = {"uint8le": "<u1", "uint16le": "<u2", "uint32le": "<u4"}[data_type]
-    elem_size = {"uint8le": 1, "uint16le": 2, "uint32le": 4}[data_type]
+    dtype = {"uint8": "u1", "uint16le": "<u2", "uint32le": "<u4"}[data_type]
+    elem_size = {"uint8": 1, "uint16le": 2, "uint32le": 4}[data_type]
 
     if compression == "bslz4":
         decompressed = decompress(encoded, "bslz4-h5", elem_size=elem_size)

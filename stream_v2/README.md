@@ -1,8 +1,10 @@
-# Stream V2
+# Stream V2 - Alpha
 
 ```diff
 - NOTE: Stream V2 is currently a preview product. The interface is not final and will change.
 ```
+
+Stream V2 is available starting with version release-2020.2.4. If you are interested in testing this new feature please contact our support team by email: support@dectris.com
 
 Stream V2 is an interface for pushing series and image data to clients over [ZeroMQ](https://zeromq.org/). It is a redesign of the legacy stream (V1) interface. Unlike stream V1, stream V2 supports pushing multichannel (multi-threshold) image data. It can be enabled and configured using the SIMPLON API.
 

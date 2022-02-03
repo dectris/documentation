@@ -1,9 +1,14 @@
+#define __STDC_WANT_IEC_60559_TYPES_EXT__
 #include "stream2.h"
 
 #include <assert.h>
+#include <float.h>
+#if FLT16_MANT_DIG > 0 || __FLT16_MANT_DIG__ > 0
+#else
 #include <immintrin.h>
 #if defined(_MSC_VER)
 #include <intrin.h>
+#endif
 #endif
 #include <stdint.h>
 #include <stdlib.h>
@@ -92,7 +97,13 @@ static enum stream2_result parse_bool(CborValue* it, bool* value) {
 }
 
 static float half_to_float(uint16_t x) {
+#if FLT16_MANT_DIG > 0 || __FLT16_MANT_DIG__ > 0
+    _Float16 f;
+    memcpy(&f, &x, 2);
+    return (float)f;
+#else
     return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(x)));
+#endif
 }
 
 static enum stream2_result parse_double(CborValue* it, double* value) {

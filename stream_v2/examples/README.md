@@ -4,7 +4,7 @@
 
 `stream2.c` and `stream2.h` implement a generic stream V2 parser using [tinycbor](https://github.com/intel/tinycbor). `example.c` uses this parser to dump received messages to stdout. The example depends on [dectris-compression](https://github.com/dectris/compression) to decompress image channel data.
 
-The code uses x86-64 intrinsics to handle conversions from half-floats and requires a processor with SSE2 and F16C support. If you are using a processor that does not support these extensions, please let us know and we will add support for your processor.
+The code requires compiler support for half-float conversions. Any C compiler supporting C11 extension ISO/IEC TS 18661-3 will work. Otherwise, x86-64 intrinsics for SSE2 and F16C are required. If the code does not work with your compiler, please let us know.
 
 #### Building
 

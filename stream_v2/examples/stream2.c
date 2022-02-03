@@ -6,6 +6,7 @@
 #include <intrin.h>
 #endif
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "tinycbor/src/cbor.h"

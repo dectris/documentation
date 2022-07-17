@@ -4,225 +4,220 @@
 #include <string.h>
 #include <zmq.h>
 
-#include "compression/src/compression.h"
 #include "stream2.h"
 
-#define IMAGE_BUFFER_SIZE (32 * 1024 * 1024 * sizeof(uint32_t))
-
-static void print_array_uint64(struct stream2_array_uint64* array) {
-    for (size_t i = 0; i < array->len; i++) {
+static void handle_start_msg(struct stream2_start_msg* msg) {
+    printf("\nSTART MESSAGE: series_id %" PRIu64 " series_unique_id %s\n",
+           msg->series_id, msg->series_unique_id);
+    printf("arm_date: %s\n", msg->arm_date ? msg->arm_date : "");
+    printf("beam_center_x: %f\n", msg->beam_center_x);
+    printf("beam_center_y: %f\n", msg->beam_center_y);
+    printf("channels: [");
+    for (size_t i = 0; i < msg->channels.len; i++) {
         if (i > 0)
             printf(" ");
-        printf("%" PRIu64, array->ptr[i]);
+        printf("\"%s\"", msg->channels.ptr[i]);
     }
-}
-
-static void print_data(const uint64_t dimensions[2],
-                       const uint8_t* data,
-                       size_t elem_size) {
-    for (uint64_t ri = 0, re = dimensions[0]; ri < re; ri++) {
-        if (ri == 12 && re > 25) {
-            ri = re - 12 - 1;
-            for (uint64_t ci = 0, ce = dimensions[1] * elem_size; ci < ce; ci++)
-            {
-                if (ci >= 25)
-                    break;
-                printf(":: ");
-            }
-        } else {
-            for (uint64_t ci = 0, ce = dimensions[1] * elem_size; ci < ce; ci++)
-            {
-                if (ci == 12 && ce > 25) {
-                    ci = ce - 12 - 1;
-                    printf(".. ");
-                    continue;
-                }
-                printf("%02" PRIx8 " ", data[ri * ce + ci]);
-            }
-        }
-        printf("\n");
-    }
-}
-
-static void handle_start_event(struct stream2_start_event* event) {
-    printf("\nSTART EVENT: series_number=%" PRIu64 " series_unique_id=%s\n",
-           event->series_number, event->series_unique_id);
-    printf("beam_center_x: %f\n", event->beam_center_x);
-    printf("beam_center_y: %f\n", event->beam_center_y);
-    for (size_t i = 0; i < event->channels.len; i++) {
-        struct stream2_start_channel* channel = &event->channels.ptr[i];
-        printf("channel %zu: data_type=%s thresholds=[", i, channel->data_type);
-        print_array_uint64(&channel->thresholds);
-        printf("]\n");
-    }
-    printf("count_time: %f\n", event->count_time);
-    if (event->countrate_correction.ptr) {
-        printf("countrate_correction: %zu entries cutoff %" PRIu32 "\n",
-               event->countrate_correction.len,
-               event->countrate_correction.len >= 2
-                       ? event->countrate_correction
-                                 .ptr[event->countrate_correction.len - 2]
+    printf("]\n");
+    printf("count_time: %f\n", msg->count_time);
+    printf("countrate_correction_enabled: %s\n",
+           msg->countrate_correction_enabled ? "true" : "false");
+    if (msg->countrate_correction_lookup_table.ptr) {
+        printf("countrate_correction_lookup_table: %zu entries cutoff %" PRIu32
+               "\n",
+               msg->countrate_correction_lookup_table.len,
+               msg->countrate_correction_lookup_table.len >= 2
+                       ? msg->countrate_correction_lookup_table.ptr
+                                 [msg->countrate_correction_lookup_table.len -
+                                  2]
                        : 0);
     }
-    printf("countrate_correction_applied: %s\n",
-           event->countrate_correction_applied ? "true" : "false");
-    printf("detector_decription: %s\n", event->detector_decription);
-    printf("detector_distance: %f\n", event->detector_distance);
-    printf("detector_serial_number: %s\n", event->detector_serial_number);
-    for (size_t i = 0; i < event->flatfield.len; i++) {
-        struct stream2_flatfield* flatfield = &event->flatfield.ptr[i];
-        printf("flatfield: threshold %" PRIu64 ": [", flatfield->threshold);
-        for (size_t j = 0; j < flatfield->array.data_len / sizeof(float); j++) {
-            if (j >= 6) {
-                printf(" ...");
-                break;
+    printf("detector_description: \"%s\"\n",
+           msg->detector_description ? msg->detector_description : "");
+    printf("detector_serial_number: \"%s\"\n",
+           msg->detector_serial_number ? msg->detector_serial_number : "");
+    printf("detector_translation: [%f %f %f]\n", msg->detector_translation[0],
+           msg->detector_translation[1], msg->detector_translation[2]);
+    for (size_t i = 0; i < msg->flatfield.len; i++) {
+        struct stream2_flatfield* flatfield = &msg->flatfield.ptr[i];
+        printf("flatfield: \"%s\" dim [%" PRIu64 " %" PRIu64 "]\n",
+               flatfield->channel, flatfield->flatfield.dim[0],
+               flatfield->flatfield.dim[1]);
+        for (uint64_t ri = 0, re = flatfield->flatfield.dim[0]; ri < re; ri++) {
+            if (ri == 6 && re > 13) {
+                ri = re - 6 - 1;
+                for (uint64_t ci = 0, ce = flatfield->flatfield.dim[1]; ci < ce;
+                     ci++) {
+                    if (ci == 6 && ce > 13) {
+                        ci = ce - 6 - 1;
+                        printf(":: ");
+                        continue;
+                    }
+                    printf(":   : ");
+                }
+            } else {
+                for (uint64_t ci = 0, ce = flatfield->flatfield.dim[1]; ci < ce;
+                     ci++) {
+                    if (ci == 6 && ce > 13) {
+                        ci = ce - 6 - 1;
+                        printf(".. ");
+                        continue;
+                    }
+                    const float f =
+                            flatfield->flatfield.array.ptr[ri * ce + ci];
+                    if (f >= 0.f && f < 10.f)
+                        printf("%.3f ", f != 0.f ? f : 0.f);
+                    else
+                        printf("##### ");
+                }
             }
-            if (j > 0)
-                printf(" ");
-            printf("%f", flatfield->array.data[j]);
+            printf("\n");
         }
-        printf("]\n");
     }
-    printf("flatfield_applied: %s\n",
-           event->flatfield_applied ? "true" : "false");
-    printf("frame_time: %f\n", event->frame_time);
-    printf("goniometer/chi: start=%f increment=%f\n",
-           event->goniometer.chi.start, event->goniometer.chi.increment);
-    printf("goniometer/kappa: start=%f increment=%f\n",
-           event->goniometer.kappa.start, event->goniometer.kappa.increment);
-    printf("goniometer/omega: start=%f increment=%f\n",
-           event->goniometer.omega.start, event->goniometer.omega.increment);
-    printf("goniometer/phi: start=%f increment=%f\n",
-           event->goniometer.phi.start, event->goniometer.phi.increment);
-    printf("goniometer/two_theta: start=%f increment=%f\n",
-           event->goniometer.two_theta.start,
-           event->goniometer.two_theta.increment);
-    printf("image_size: [%" PRIu64 " %" PRIu64 "]\n", event->image_size[0],
-           event->image_size[1]);
-    printf("images_per_trigger: %" PRIu64 "\n", event->images_per_trigger);
-    printf("incident_energy: %f\n", event->incident_energy);
-    printf("incident_wavelength: %f\n", event->incident_wavelength);
-    printf("number_of_images: %" PRIu64 "\n", event->number_of_images);
-    printf("number_of_triggers: %" PRIu64 "\n", event->number_of_triggers);
-    for (size_t i = 0; i < event->pixel_mask.len; i++) {
-        struct stream2_pixel_mask* pixel_mask = &event->pixel_mask.ptr[i];
-        printf("pixel_mask: threshold %" PRIu64 ": [", pixel_mask->threshold);
-        for (size_t j = 0; j < pixel_mask->array.data_len / sizeof(uint32_t);
-             j++) {
-            if (j >= 6) {
-                printf(" ...");
-                break;
-            }
-            if (j > 0)
-                printf(" ");
-            printf("%08" PRIu32, pixel_mask->array.data[j]);
-        }
-        printf("]\n");
-    }
-    printf("pixel_mask_applied: %s\n",
-           event->pixel_mask_applied ? "true" : "false");
-    printf("pixel_size_x: %f\n", event->pixel_size_x);
-    printf("pixel_size_y: %f\n", event->pixel_size_y);
-    printf("roi_mode: %s\n", event->roi_mode);
-    printf("saturation_value: %" PRIu64 "\n", event->saturation_value);
-    printf("sensor_material: %s\n", event->sensor_material);
-    printf("sensor_thickness: %f\n", event->sensor_thickness);
-    printf("series_date: %s\n", event->series_date);
-    for (size_t i = 0; i < event->threshold_energy.len; i++) {
-        printf("threshold_energy: threshold %" PRIu64 ": %f\n",
-               event->threshold_energy.ptr[i].threshold,
-               event->threshold_energy.ptr[i].energy);
-    }
-    printf("virtual_pixel_correction_applied: %s\n",
-           event->virtual_pixel_correction_applied ? "true" : "false");
-}
-
-static size_t data_type_size(const char* data_type) {
-    if (strcmp(data_type, "uint8") == 0) {
-        return 1;
-    } else if (strcmp(data_type, "uint16le") == 0) {
-        return 2;
-    } else if (strcmp(data_type, "uint32le") == 0) {
-        return 4;
-    } else {
-        fprintf(stderr, "error: unsupported data type `%s`\n", data_type);
-        exit(EXIT_FAILURE);
-    }
-}
-
-static void handle_image_event(struct stream2_image_event* event) {
-    printf("\nIMAGE EVENT: series_number=%" PRIu64 " series_unique_id=%s\n",
-           event->series_number, event->series_unique_id);
-    printf("image_number: %" PRIu64 "\n", event->image_number);
-    printf("hardware_start_time: %" PRIu64 "/%" PRIu64 "\n",
-           event->hardware_start_time[0], event->hardware_start_time[1]);
-    printf("hardware_stop_time: %" PRIu64 "/%" PRIu64 "\n",
-           event->hardware_stop_time[0], event->hardware_stop_time[1]);
-    printf("hardware_exposure_time: %" PRIu64 "/%" PRIu64 "\n",
-           event->hardware_exposure_time[0], event->hardware_exposure_time[1]);
-
-    static uint8_t buffer[IMAGE_BUFFER_SIZE];
-
-    for (size_t i = 0; i < event->channels.len; i++) {
-        struct stream2_image_channel* channel = &event->channels.ptr[i];
-        size_t elem_size = data_type_size(channel->data_type);
-
-        printf("channel %zu: compression=%s data_type=%s "
-               "lost_pixel_count=%" PRIu64 " thresholds=[",
-               i, channel->compression, channel->data_type,
-               channel->lost_pixel_count);
-        print_array_uint64(&channel->thresholds);
-        printf("]\n");
-
-        const uint8_t* data;
-        size_t data_len;
-        if (strcmp(channel->compression, "bslz4") == 0) {
-            data = buffer;
-            data_len = compression_decompress_buffer(
-                    COMPRESSION_BSLZ4_HDF5, (char*)buffer, sizeof(buffer),
-                    (char*)channel->array.data, channel->array.data_len,
-                    elem_size);
-        } else if (strcmp(channel->compression, "lz4") == 0) {
-            data = buffer;
-            data_len = compression_decompress_buffer(
-                    COMPRESSION_LZ4_HDF5, (char*)buffer, sizeof(buffer),
-                    (char*)channel->array.data, channel->array.data_len,
-                    elem_size);
-        } else {
-            fprintf(stderr, "error: unsupported compression `%s`\n",
-                    channel->compression);
-            exit(EXIT_FAILURE);
-        }
-        if (data_len == COMPRESSION_ERROR) {
-            fprintf(stderr, "error: failed to decompress channel\n");
-            exit(EXIT_FAILURE);
-        } else if (data_len != channel->array.dimensions[0] *
-                                       channel->array.dimensions[1] * elem_size)
+    printf("flatfield_enabled: %s\n",
+           msg->flatfield_enabled ? "true" : "false");
+    printf("frame_time: %f\n", msg->frame_time);
+    printf("goniometer: chi: start %f increment %f\n",
+           msg->goniometer.chi.start, msg->goniometer.chi.increment);
+    printf("goniometer: kappa: start %f increment %f\n",
+           msg->goniometer.kappa.start, msg->goniometer.kappa.increment);
+    printf("goniometer: omega: start %f increment %f\n",
+           msg->goniometer.omega.start, msg->goniometer.omega.increment);
+    printf("goniometer: phi: start %f increment %f\n",
+           msg->goniometer.phi.start, msg->goniometer.phi.increment);
+    printf("goniometer: two_theta: start %f increment %f\n",
+           msg->goniometer.two_theta.start,
+           msg->goniometer.two_theta.increment);
+    printf("image_size_x: %" PRIu64 "\n", msg->image_size_x);
+    printf("image_size_y: %" PRIu64 "\n", msg->image_size_y);
+    printf("incident_energy: %f\n", msg->incident_energy);
+    printf("incident_wavelength: %f\n", msg->incident_wavelength);
+    printf("number_of_images: %" PRIu64 "\n", msg->number_of_images);
+    for (size_t i = 0; i < msg->pixel_mask.len; i++) {
+        struct stream2_pixel_mask* pixel_mask = &msg->pixel_mask.ptr[i];
+        printf("pixel_mask: \"%s\" dim [%" PRIu64 " %" PRIu64 "]\n",
+               pixel_mask->channel, pixel_mask->pixel_mask.dim[0],
+               pixel_mask->pixel_mask.dim[1]);
+        for (uint64_t ri = 0, re = pixel_mask->pixel_mask.dim[0]; ri < re; ri++)
         {
-            fprintf(stderr, "error: bad data size %zu\n", data_len);
-            exit(EXIT_FAILURE);
+            if (ri == 4 && re > 9) {
+                ri = re - 4 - 1;
+                for (uint64_t ci = 0, ce = pixel_mask->pixel_mask.dim[1];
+                     ci < ce; ci++) {
+                    if (ci == 4 && ce > 9) {
+                        ci = ce - 4 - 1;
+                        printf(":: ");
+                        continue;
+                    }
+                    printf(":      : ");
+                }
+            } else {
+                for (uint64_t ci = 0, ce = pixel_mask->pixel_mask.dim[1];
+                     ci < ce; ci++) {
+                    if (ci == 4 && ce > 9) {
+                        ci = ce - 4 - 1;
+                        printf(".. ");
+                        continue;
+                    }
+                    printf("%08" PRIx32 " ",
+                           pixel_mask->pixel_mask.array.ptr[ri * ce + ci]);
+                }
+            }
+            printf("\n");
         }
-        print_data(channel->array.dimensions, data, elem_size);
+    }
+    printf("pixel_mask_enabled: %s\n",
+           msg->pixel_mask_enabled ? "true" : "false");
+    printf("pixel_size_x: %f\n", msg->pixel_size_x);
+    printf("pixel_size_y: %f\n", msg->pixel_size_y);
+    printf("saturation_value: %" PRIu64 "\n", msg->saturation_value);
+    printf("sensor_material: \"%s\"\n",
+           msg->sensor_material ? msg->sensor_material : "");
+    printf("sensor_thickness: %f\n", msg->sensor_thickness);
+    for (size_t i = 0; i < msg->threshold_energy.len; i++) {
+        printf("threshold_energy: \"%s\" %f\n",
+               msg->threshold_energy.ptr[i].channel,
+               msg->threshold_energy.ptr[i].energy);
+    }
+    printf("virtual_pixel_interpolation_enabled: %s\n",
+           msg->virtual_pixel_interpolation_enabled ? "true" : "false");
+}
+
+static void handle_image_msg(struct stream2_image_msg* msg) {
+    printf("\nIMAGE MESSAGE: series_id %" PRIu64 " series_unique_id %s\n",
+           msg->series_id, msg->series_unique_id);
+    printf("image_id: %" PRIu64 "\n", msg->image_id);
+    printf("real_time: %" PRIu64 "/%" PRIu64 "\n", msg->real_time[0],
+           msg->real_time[1]);
+    printf("series_date: %s\n", msg->series_date ? msg->series_date : "");
+    printf("start_time: %" PRIu64 "/%" PRIu64 "\n", msg->start_time[0],
+           msg->start_time[1]);
+    printf("stop_time: %" PRIu64 "/%" PRIu64 "\n", msg->stop_time[0],
+           msg->stop_time[1]);
+    for (size_t i = 0; i < msg->data.len; i++) {
+        struct stream2_image_data* data = &msg->data.ptr[i];
+        printf("data: \"%s\" dim [%" PRIu64 " %" PRIu64 "] elem size %zu\n",
+               data->channel, data->data.dim[0], data->data.dim[1],
+               data->elem_size);
+        for (uint64_t ri = 0, re = data->data.dim[0]; ri < re; ri++) {
+            if (ri == 12 && re > 25) {
+                ri = re - 12 - 1;
+                for (uint64_t ci = 0, ce = data->data.dim[1] * data->elem_size;
+                     ci < ce; ci++) {
+                    if (ci >= 25)
+                        break;
+                    printf(":: ");
+                }
+            } else {
+                for (uint64_t ci = 0, ce = data->data.dim[1] * data->elem_size;
+                     ci < ce; ci++) {
+                    if (ci == 12 && ce > 25) {
+                        ci = ce - 12 - 1;
+                        printf(".. ");
+                        continue;
+                    }
+                    printf("%02" PRIx8 " ",
+                           ((uint8_t*)data->data.array.ptr)[ri * ce + ci]);
+                }
+            }
+            printf("\n");
+        }
     }
 }
 
-static void handle_end_event(struct stream2_end_event* event) {
-    printf("\nEND EVENT: series_number=%" PRIu64 " series_unique_id=%s\n",
-           event->series_number, event->series_unique_id);
+static void handle_end_msg(struct stream2_end_msg* msg) {
+    printf("\nEND MESSAGE: series_id %" PRIu64 " series_unique_id %s\n",
+           msg->series_id, msg->series_unique_id);
 }
 
-static void handle_event(struct stream2_event* event) {
-    switch (event->type) {
-        case STREAM2_EVENT_START:
-            handle_start_event((struct stream2_start_event*)event);
+static void handle_msg(struct stream2_msg* msg) {
+    switch (msg->type) {
+        case STREAM2_MSG_START:
+            handle_start_msg((struct stream2_start_msg*)msg);
             break;
-        case STREAM2_EVENT_IMAGE:
-            handle_image_event((struct stream2_image_event*)event);
+        case STREAM2_MSG_IMAGE:
+            handle_image_msg((struct stream2_image_msg*)msg);
             break;
-        case STREAM2_EVENT_END:
-            handle_end_event((struct stream2_end_event*)event);
+        case STREAM2_MSG_END:
+            handle_end_msg((struct stream2_end_msg*)msg);
             break;
     }
+}
+
+static enum stream2_result parse_msg(const uint8_t* msg_data, size_t msg_size) {
+    enum stream2_result r;
+
+    struct stream2_msg* msg;
+    if ((r = stream2_parse_msg(msg_data, msg_size, &msg))) {
+        fprintf(stderr, "error: error %i parsing message\n", (int)r);
+        return r;
+    }
+
+    handle_msg(msg);
+
+    stream2_free_msg(msg);
+
+    return STREAM2_OK;
 }
 
 int main(int argc, char** argv) {
@@ -234,8 +229,8 @@ int main(int argc, char** argv) {
     char address[100];
     sprintf(address, "tcp://%s:31001", argv[1]);
 
-    void* context = zmq_ctx_new();
-    void* socket = zmq_socket(context, ZMQ_PULL);
+    void* ctx = zmq_ctx_new();
+    void* socket = zmq_socket(ctx, ZMQ_PULL);
 
     zmq_connect(socket, address);
     zmq_msg_t msg;
@@ -246,18 +241,13 @@ int main(int argc, char** argv) {
 
         const uint8_t* msg_data = (const uint8_t*)zmq_msg_data(&msg);
         size_t msg_size = zmq_msg_size(&msg);
-        struct stream2_event* event;
+
         enum stream2_result r;
-        if ((r = stream2_parse_event(msg_data, msg_size, &event))) {
-            fprintf(stderr, "error: error %i parsing message\n", (int)r);
-            return EXIT_FAILURE;
-        }
-        handle_event(event);
-        stream2_free_event(event);
+        if ((r = parse_msg(msg_data, msg_size)))
+            break;
     }
     zmq_msg_close(&msg);
     zmq_close(socket);
-    zmq_ctx_term(context);
-
-    return EXIT_SUCCESS;
+    zmq_ctx_term(ctx);
+    return EXIT_FAILURE;
 }

@@ -21,6 +21,11 @@ def decode_typed_array(tag, dtype):
     return np.frombuffer(tag.value, dtype=dtype)
 
 
+def decode_dectris_compression(tag):
+    algorithm, elem_size, encoded = tag.value
+    return decompress(encoded, algorithm, elem_size=elem_size)
+
+
 tag_decoders = {
     40: lambda tag: decode_multi_dim_array(tag, column_major=False),
     64: lambda tag: decode_typed_array(tag, dtype="u1"),
@@ -47,37 +52,13 @@ tag_decoders = {
     86: lambda tag: decode_typed_array(tag, dtype="<f8"),
     87: lambda tag: decode_typed_array(tag, dtype="<f16"),
     1040: lambda tag: decode_multi_dim_array(tag, column_major=True),
+    56500: lambda tag: decode_dectris_compression(tag),
 }
 
 
 def tag_hook(decoder, tag):
     tag_decoder = tag_decoders.get(tag.tag)
     return tag_decoder(tag) if tag_decoder else tag
-
-
-def decompress_channel_data(channel):
-    data = channel["data"]
-
-    if isinstance(data, (np.ndarray, np.generic)):
-        return data
-
-    dimensions, encoded = data
-
-    compression = channel["compression"]
-    data_type = channel["data_type"]
-    dtype = {"uint8": "u1", "uint16le": "<u2", "uint32le": "<u4"}[data_type]
-    elem_size = {"uint8": 1, "uint16le": 2, "uint32le": 4}[data_type]
-
-    if compression == "bslz4":
-        decompressed = decompress(encoded, "bslz4-h5", elem_size=elem_size)
-    elif compression == "lz4":
-        decompressed = decompress(encoded, "lz4-h5")
-    elif compression == "none":
-        decompressed = encoded
-    else:
-        raise NotImplementedError(f"unknown compression: {compression}")
-
-    return np.frombuffer(decompressed, dtype=dtype).reshape(dimensions)
 
 
 if __name__ == "__main__":
@@ -98,7 +79,4 @@ if __name__ == "__main__":
             message = socket.recv()
             message = cbor2.loads(message, tag_hook=tag_hook)
             print(f"========== MESSAGE[{message['type']}] ==========")
-            if message["type"] == "image":
-                for channel in message["channels"]:
-                    channel["data"] = decompress_channel_data(channel)
-            pprint(message)
+            pprint(message, sort_dicts=False)

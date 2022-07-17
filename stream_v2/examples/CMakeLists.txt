@@ -58,11 +58,13 @@ add_library(stream2 STATIC
     stream2.c
     stream2.h
     )
-target_link_libraries(stream2 PRIVATE tinycbor)
+target_link_libraries(stream2 PRIVATE
+    compression
+    tinycbor
+    )
 
 add_executable(example example.c)
 target_link_libraries(example
     ${LIBZMQ_TARGET}
-    compression
     stream2
     )

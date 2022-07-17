@@ -1,8 +1,5 @@
 #pragma once
 
-//  This module contains a few functions to show how stream2 cbor messages
-//  can be decoded.
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -19,10 +16,14 @@ enum stream2_result {
     STREAM2_ERROR_PARSE,
 };
 
-enum stream2_event_type {
-    STREAM2_EVENT_START,
-    STREAM2_EVENT_IMAGE,
-    STREAM2_EVENT_END,
+struct stream2_array {
+    void* ptr;
+    size_t len;
+};
+
+struct stream2_array_float {
+    float* ptr;
+    size_t len;
 };
 
 struct stream2_array_uint32 {
@@ -30,33 +31,30 @@ struct stream2_array_uint32 {
     size_t len;
 };
 
-struct stream2_array_uint64 {
-    uint64_t* ptr;
+struct stream2_array_text_string {
+    char** ptr;
     size_t len;
 };
 
-// https://tools.ietf.org/html/rfc8746#section-3.1
-struct multidim_array {
-    uint64_t dimensions[2];
-    uint8_t* data;
-    size_t data_len;
+// https://www.rfc-editor.org/rfc/rfc8746.html#name-row-major-order
+struct stream2_multidim_array {
+    uint64_t dim[2];
+    struct stream2_array array;
 };
 
-struct multidim_array_float {
-    uint64_t dimensions[2];
-    float* data;
-    size_t data_len;
+struct stream2_multidim_array_float {
+    uint64_t dim[2];
+    struct stream2_array_float array;
 };
 
-struct multidim_array_uint32 {
-    uint64_t dimensions[2];
-    uint32_t* data;
-    size_t data_len;
+struct stream2_multidim_array_uint32 {
+    uint64_t dim[2];
+    struct stream2_array_uint32 array;
 };
 
 struct stream2_flatfield {
-    uint64_t threshold;
-    struct multidim_array_float array;
+    char* channel;
+    struct stream2_multidim_array_float flatfield;
 };
 
 struct stream2_flatfield_map {
@@ -77,22 +75,20 @@ struct stream2_goniometer {
     struct stream2_goniometer_axis two_theta;
 };
 
-struct stream2_image_channel {
-    char* compression;
-    char* data_type;
-    uint64_t lost_pixel_count;
-    struct stream2_array_uint64 thresholds;
-    struct multidim_array array;
+struct stream2_image_data {
+    char* channel;
+    struct stream2_multidim_array data;
+    uint64_t elem_size;
 };
 
-struct stream2_image_channels {
-    struct stream2_image_channel* ptr;
+struct stream2_image_data_map {
+    struct stream2_image_data* ptr;
     size_t len;
 };
 
 struct stream2_pixel_mask {
-    uint64_t threshold;
-    struct multidim_array_uint32 array;
+    char* channel;
+    struct stream2_multidim_array_uint32 pixel_mask;
 };
 
 struct stream2_pixel_mask_map {
@@ -100,18 +96,8 @@ struct stream2_pixel_mask_map {
     size_t len;
 };
 
-struct stream2_start_channel {
-    char* data_type;
-    struct stream2_array_uint64 thresholds;
-};
-
-struct stream2_start_channels {
-    struct stream2_start_channel* ptr;
-    size_t len;
-};
-
 struct stream2_threshold_energy {
-    uint64_t threshold;
+    char* channel;
     double energy;
 };
 
@@ -120,71 +106,76 @@ struct stream2_threshold_energy_map {
     size_t len;
 };
 
-struct stream2_event {
-    enum stream2_event_type type;
-    uint64_t series_number;
+enum stream2_msg_type {
+    STREAM2_MSG_START,
+    STREAM2_MSG_IMAGE,
+    STREAM2_MSG_END,
+};
+
+struct stream2_msg {
+    enum stream2_msg_type type;
+    uint64_t series_id;
     char* series_unique_id;
 };
 
-struct stream2_start_event {
-    enum stream2_event_type type;
-    uint64_t series_number;
+struct stream2_start_msg {
+    enum stream2_msg_type type;
+    uint64_t series_id;
     char* series_unique_id;
 
+    char* arm_date;
     double beam_center_x;
     double beam_center_y;
-    struct stream2_start_channels channels;
+    struct stream2_array_text_string channels;
     double count_time;
-    struct stream2_array_uint32 countrate_correction;
-    bool countrate_correction_applied;
-    char* detector_decription;
-    double detector_distance;
+    bool countrate_correction_enabled;
+    struct stream2_array_uint32 countrate_correction_lookup_table;
+    char* detector_description;
     char* detector_serial_number;
+    double detector_translation[3];
     struct stream2_flatfield_map flatfield;
-    bool flatfield_applied;
+    bool flatfield_enabled;
     double frame_time;
     struct stream2_goniometer goniometer;
-    uint64_t image_size[2];
-    uint64_t images_per_trigger;
+    uint64_t image_size_x;
+    uint64_t image_size_y;
     double incident_energy;
     double incident_wavelength;
     uint64_t number_of_images;
-    uint64_t number_of_triggers;
     struct stream2_pixel_mask_map pixel_mask;
-    bool pixel_mask_applied;
+    bool pixel_mask_enabled;
     double pixel_size_x;
     double pixel_size_y;
-    char* roi_mode;
     uint64_t saturation_value;
     char* sensor_material;
     double sensor_thickness;
-    char* series_date;
     struct stream2_threshold_energy_map threshold_energy;
-    bool virtual_pixel_correction_applied;
+    bool virtual_pixel_interpolation_enabled;
 };
 
-struct stream2_image_event {
-    enum stream2_event_type type;
-    uint64_t series_number;
+struct stream2_image_msg {
+    enum stream2_msg_type type;
+    uint64_t series_id;
     char* series_unique_id;
 
-    uint64_t image_number;
-    uint64_t hardware_start_time[2];
-    uint64_t hardware_stop_time[2];
-    uint64_t hardware_exposure_time[2];
-    struct stream2_image_channels channels;
+    uint64_t image_id;
+    uint64_t real_time[2];
+    char* series_date;
+    uint64_t start_time[2];
+    uint64_t stop_time[2];
+    struct stream2_image_data_map data;
 };
 
-struct stream2_end_event {
-    enum stream2_event_type type;
-    uint64_t series_number;
+struct stream2_end_msg {
+    enum stream2_msg_type type;
+    uint64_t series_id;
     char* series_unique_id;
 };
 
-enum stream2_result stream2_parse_event(const uint8_t* message,
-                                        const size_t size,
-                                        struct stream2_event** event);
-void stream2_free_event(struct stream2_event*);
+enum stream2_result stream2_parse_msg(const uint8_t* buffer,
+                                      const size_t size,
+                                      struct stream2_msg** msg_out);
+void stream2_free_msg(struct stream2_msg* msg);
 
 #if defined(__cplusplus)
 }

@@ -14,12 +14,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "compression/src/compression.h"
 #include "tinycbor/src/cbor.h"
 
 enum { MAX_KEY_LEN = 64 };
 
+static const CborTag MULTI_DIMENSIONAL_ARRAY_ROW_MAJOR = 40;
 static const CborTag TYPED_ARRAY_UINT32_LITTLE_ENDIAN = 70;
 static const CborTag TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN = 85;
+static const CborTag DECTRIS_COMPRESSION = 56500;
 
 static enum stream2_result CBOR_RESULT(CborError e) {
     switch (e) {
@@ -36,14 +39,14 @@ static enum stream2_result CBOR_RESULT(CborError e) {
 }
 
 static enum stream2_result consume_byte_string_nocopy(const CborValue* it,
-                                                      uint8_t** string,
-                                                      size_t* len,
+                                                      const uint8_t** bstr,
+                                                      size_t* bstr_len,
                                                       CborValue* next) {
     enum stream2_result r;
 
     assert(cbor_value_is_byte_string(it));
 
-    if ((r = CBOR_RESULT(cbor_value_get_string_length(it, len))))
+    if ((r = CBOR_RESULT(cbor_value_get_string_length(it, bstr_len))))
         return r;
 
     const uint8_t* ptr = cbor_value_get_next_byte(it);
@@ -62,7 +65,7 @@ static enum stream2_result consume_byte_string_nocopy(const CborValue* it,
             ptr += 8;
             break;
     }
-    *string = (uint8_t*)ptr;
+    *bstr = ptr;
 
     if (next) {
         *next = *it;
@@ -70,6 +73,21 @@ static enum stream2_result consume_byte_string_nocopy(const CborValue* it,
             return r;
     }
     return STREAM2_OK;
+}
+
+static enum stream2_result parse_key(CborValue* it, char key[MAX_KEY_LEN]) {
+    if (!cbor_value_is_text_string(it))
+        return STREAM2_ERROR_PARSE;
+
+    size_t key_len = MAX_KEY_LEN;
+    CborError e = cbor_value_copy_text_string(it, key, &key_len, it);
+    if (e == CborErrorOutOfMemory || key_len == MAX_KEY_LEN) {
+        // The key is longer than any we suppport. Return the empty key which
+        // should be handled by the caller like other unknown keys.
+        key[0] = '\0';
+        return STREAM2_OK;
+    }
+    return CBOR_RESULT(e);
 }
 
 static enum stream2_result parse_tag(CborValue* it, CborTag* value) {
@@ -141,18 +159,17 @@ static enum stream2_result parse_uint64(CborValue* it, uint64_t* value) {
     return CBOR_RESULT(cbor_value_advance_fixed(it));
 }
 
-static enum stream2_result parse_text_string(CborValue* it, char** string) {
-    if (!cbor_value_is_text_string(it))
-        return STREAM2_ERROR_PARSE;
-
-    size_t len;
-    return CBOR_RESULT(cbor_value_dup_text_string(it, string, &len, it));
-}
-
-static enum stream2_result parse_array_uint64(
-        CborValue* it,
-        struct stream2_array_uint64* array) {
+static enum stream2_result parse_dectris_compression(CborValue* it,
+                                                     uint8_t** bstr,
+                                                     size_t* bstr_len) {
     enum stream2_result r;
+
+    CborTag tag;
+    if ((r = parse_tag(it, &tag)))
+        return r;
+
+    if (tag != DECTRIS_COMPRESSION)
+        return STREAM2_ERROR_PARSE;
 
     if (!cbor_value_is_array(it))
         return STREAM2_ERROR_PARSE;
@@ -161,21 +178,87 @@ static enum stream2_result parse_array_uint64(
     if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
         return r;
 
-    array->ptr = calloc(len, sizeof(uint64_t));
-    if (array->ptr == NULL)
-        return STREAM2_ERROR_OUT_OF_MEMORY;
-    array->len = len;
+    if (len != 3)
+        return STREAM2_ERROR_PARSE;
 
     CborValue elt;
     if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
         return r;
 
-    for (size_t i = 0; i < len; i++) {
-        if ((r = parse_uint64(&elt, &array->ptr[i])))
-            return r;
+    char key[MAX_KEY_LEN];
+    if ((r = parse_key(&elt, key)))
+        return r;
+
+    CompressionAlgorithm algorithm;
+    if (strcmp(key, "bslz4") == 0) {
+        algorithm = COMPRESSION_BSLZ4_HDF5;
+    } else if (strcmp(key, "lz4") == 0) {
+        algorithm = COMPRESSION_LZ4_HDF5;
+    } else {
+        return STREAM2_ERROR_PARSE;
     }
 
+    uint64_t elem_size;
+    if ((r = parse_uint64(&elt, &elem_size)))
+        return r;
+
+    if (elem_size > SIZE_MAX)
+        return STREAM2_ERROR_PARSE;
+
+    if (!cbor_value_is_byte_string(&elt))
+        return STREAM2_ERROR_PARSE;
+
+    const uint8_t* encoded;
+    size_t encoded_len;
+    if ((r = consume_byte_string_nocopy(&elt, &encoded, &encoded_len, &elt)))
+        return r;
+
+    *bstr_len = compression_decompress_buffer(
+            algorithm, NULL, 0, (const char*)encoded, encoded_len, elem_size);
+    if (*bstr_len == COMPRESSION_ERROR)
+        return STREAM2_ERROR_DECODE;
+
+    *bstr = malloc(*bstr_len);
+    if (*bstr == NULL)
+        return STREAM2_ERROR_OUT_OF_MEMORY;
+
+    if (compression_decompress_buffer(algorithm, (char*)*bstr, *bstr_len,
+                                      (const char*)encoded, encoded_len,
+                                      elem_size) != *bstr_len)
+        return STREAM2_ERROR_DECODE;
+
     return CBOR_RESULT(cbor_value_leave_container(it, &elt));
+}
+
+static enum stream2_result parse_byte_string(CborValue* it,
+                                             uint8_t** bstr,
+                                             size_t* bstr_len) {
+    enum stream2_result r;
+
+    if (cbor_value_is_tag(it)) {
+        CborTag tag;
+        if ((r = CBOR_RESULT(cbor_value_get_tag(it, &tag))))
+            return r;
+
+        if (tag == DECTRIS_COMPRESSION) {
+            return parse_dectris_compression(it, bstr, bstr_len);
+        } else {
+            return STREAM2_ERROR_PARSE;
+        }
+    }
+
+    if (!cbor_value_is_byte_string(it))
+        return STREAM2_ERROR_PARSE;
+
+    return CBOR_RESULT(cbor_value_dup_byte_string(it, bstr, bstr_len, it));
+}
+
+static enum stream2_result parse_text_string(CborValue* it, char** tstr) {
+    if (!cbor_value_is_text_string(it))
+        return STREAM2_ERROR_PARSE;
+
+    size_t len;
+    return CBOR_RESULT(cbor_value_dup_text_string(it, tstr, &len, it));
 }
 
 static enum stream2_result parse_array_2_uint64(CborValue* it,
@@ -204,38 +287,60 @@ static enum stream2_result parse_array_2_uint64(CborValue* it,
     return CBOR_RESULT(cbor_value_leave_container(it, &elt));
 }
 
-static enum stream2_result parse_key(CborValue* it, char key[MAX_KEY_LEN]) {
-    if (!cbor_value_is_text_string(it))
-        return STREAM2_ERROR_PARSE;
-
-    size_t key_len = MAX_KEY_LEN;
-    CborError e = cbor_value_copy_text_string(it, key, &key_len, it);
-    if (e == CborErrorOutOfMemory || key_len == MAX_KEY_LEN) {
-        // The key is longer than any we suppport. Return the empty key which
-        // should be handled by the caller like other unknown keys.
-        key[0] = '\0';
-        return STREAM2_OK;
-    }
-    return CBOR_RESULT(e);
-}
-
-// Fill multidim_array, fields dimensions and array. cbor tag 0x40.
-// https://tools.ietf.org/html/rfc8746 section 3.1.1
-// Note: this expects only a 2d array.
+// Parses a typed array from [RFC 8746 section 2].
 //
-// If nocopy is true, the array data will point into the buffer, without
-// any alignment. Therefore it is only used for the image data.
-//
-// data_tag returns the tag for the byte stream. If not set, the invalid tag
-// with value UINT64_MAX is returned.
-static enum stream2_result parse_multidim_array(CborValue* it,
-                                                struct multidim_array* array,
-                                                bool nocopy,
-                                                CborTag* data_tag) {
+// [RFC 8746 section 2]:
+// https://www.rfc-editor.org/rfc/rfc8746.html#name-typed-arrays
+static enum stream2_result parse_typed_array(CborValue* it,
+                                             struct stream2_array* array,
+                                             CborTag* type_tag,
+                                             size_t* elem_size) {
     enum stream2_result r;
 
-    if ((r = CBOR_RESULT(cbor_value_skip_tag(it))))
+    CborTag tag;
+    if ((r = parse_tag(it, &tag)))
         return r;
+
+    if (tag < 64 || tag > 87)
+        return STREAM2_ERROR_PARSE;
+
+    if (*type_tag != UINT64_MAX && tag != *type_tag)
+        return STREAM2_ERROR_PARSE;
+    *type_tag = tag;
+    // https://www.rfc-editor.org/rfc/rfc8746.html#name-types-of-numbers
+    const uint64_t f = (tag >> 4) & 1;
+    const uint64_t ll = tag & 3;
+    *elem_size = 1 << (f + ll);
+
+    size_t len;
+    if ((r = parse_byte_string(it, (uint8_t**)&array->ptr, &len)))
+        return r;
+
+    if (len % *elem_size != 0)
+        return STREAM2_ERROR_PARSE;
+
+    array->len = len / *elem_size;
+
+    return STREAM2_OK;
+}
+
+// Parses a multi-dimensional array from [RFC 8746 section 3.1.1].
+//
+// [RFC 8746 section 3.1.1]:
+// https://www.rfc-editor.org/rfc/rfc8746.html#name-row-major-order
+static enum stream2_result parse_multidim_array(
+        CborValue* it,
+        struct stream2_multidim_array* multidim,
+        CborTag* type_tag,
+        size_t* elem_size) {
+    enum stream2_result r;
+
+    CborTag tag;
+    if ((r = parse_tag(it, &tag)))
+        return r;
+
+    if (tag != MULTI_DIMENSIONAL_ARRAY_ROW_MAJOR)
+        return STREAM2_ERROR_PARSE;
 
     if (!cbor_value_is_array(it))
         return STREAM2_ERROR_PARSE;
@@ -251,28 +356,14 @@ static enum stream2_result parse_multidim_array(CborValue* it,
     if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
         return r;
 
-    if ((r = parse_array_2_uint64(&elt, array->dimensions)))
+    if ((r = parse_array_2_uint64(&elt, multidim->dim)))
         return r;
 
-    if (cbor_value_is_tag(&elt)) {
-        if ((r = parse_tag(&elt, data_tag)))
-            return r;
-    } else {
-        *data_tag = UINT64_MAX;
-    }
+    if ((r = parse_typed_array(&elt, &multidim->array, type_tag, elem_size)))
+        return r;
 
-    if (!cbor_value_is_byte_string(&elt))
+    if (multidim->dim[0] * multidim->dim[1] != multidim->array.len)
         return STREAM2_ERROR_PARSE;
-
-    if (nocopy) {
-        if ((r = consume_byte_string_nocopy(&elt, &array->data,
-                                            &array->data_len, &elt)))
-            return r;
-    } else {
-        if ((r = CBOR_RESULT(cbor_value_dup_byte_string(
-                     &elt, &array->data, &array->data_len, &elt))))
-            return r;
-    }
 
     return CBOR_RESULT(cbor_value_leave_container(it, &elt));
 }
@@ -356,81 +447,16 @@ static enum stream2_result parse_goniometer(
     return CBOR_RESULT(cbor_value_leave_container(it, &field));
 }
 
-static enum stream2_result parse_start_channel(
-        CborValue* it,
-        struct stream2_start_channel* channel) {
+static enum stream2_result parse_start_msg(CborValue* it,
+                                           struct stream2_msg** msg_out) {
     enum stream2_result r;
 
-    if (!cbor_value_is_map(it))
-        return STREAM2_ERROR_PARSE;
-
-    CborValue field;
-    if ((r = CBOR_RESULT(cbor_value_enter_container(it, &field))))
-        return r;
-
-    while (cbor_value_is_valid(&field)) {
-        char key[MAX_KEY_LEN];
-        if ((r = parse_key(&field, key)))
-            return r;
-
-        if ((r = CBOR_RESULT(cbor_value_skip_tag(&field))))
-            return r;
-
-        if (strcmp(key, "data_type") == 0) {
-            if ((r = parse_text_string(&field, &channel->data_type)))
-                return r;
-        } else if (strcmp(key, "thresholds") == 0) {
-            if ((r = parse_array_uint64(&field, &channel->thresholds)))
-                return r;
-        } else {
-            if ((r = CBOR_RESULT(cbor_value_advance(&field))))
-                return r;
-        }
-    }
-
-    return CBOR_RESULT(cbor_value_leave_container(it, &field));
-}
-
-static enum stream2_result parse_start_channels(
-        CborValue* it,
-        struct stream2_start_channels* channels) {
-    enum stream2_result r;
-
-    if (!cbor_value_is_array(it))
-        return STREAM2_ERROR_PARSE;
-
-    size_t len;
-    if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
-        return r;
-
-    channels->ptr = calloc(len, sizeof(struct stream2_start_channel));
-    if (channels->ptr == NULL)
-        return STREAM2_ERROR_OUT_OF_MEMORY;
-    channels->len = len;
-
-    CborValue elt;
-    if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
-        return r;
-
-    for (size_t i = 0; i < len; i++) {
-        if ((r = parse_start_channel(&elt, &channels->ptr[i])))
-            return r;
-    }
-
-    return CBOR_RESULT(cbor_value_leave_container(it, &elt));
-}
-
-static enum stream2_result parse_start_event(CborValue* it,
-                                             struct stream2_event** e) {
-    enum stream2_result r;
-
-    struct stream2_start_event* event =
-            calloc(1, sizeof(struct stream2_start_event));
-    if (event == NULL)
+    struct stream2_start_msg* msg = calloc(1, sizeof(struct stream2_start_msg));
+    *msg_out = (struct stream2_msg*)msg;
+    if (msg == NULL)
         return STREAM2_ERROR_OUT_OF_MEMORY;
 
-    *e = (struct stream2_event*)event;
-    event->type = STREAM2_EVENT_START;
+    msg->type = STREAM2_MSG_START;
 
     while (cbor_value_is_valid(it)) {
         char key[MAX_KEY_LEN];
@@ -438,58 +464,93 @@ static enum stream2_result parse_start_event(CborValue* it,
             return r;
 
         // skip any tag for a value, except where verified
-        if (strcmp(key, "countrate_correction") != 0) {
+        if (strcmp(key, "countrate_correction_lookup_table") != 0) {
             if ((r = CBOR_RESULT(cbor_value_skip_tag(it))))
                 return r;
         }
 
-        if (strcmp(key, "series_number") == 0) {
-            if ((r = parse_uint64(it, &event->series_number)))
+        if (strcmp(key, "series_id") == 0) {
+            if ((r = parse_uint64(it, &msg->series_id)))
                 return r;
         } else if (strcmp(key, "series_unique_id") == 0) {
-            if ((r = parse_text_string(it, &event->series_unique_id)))
+            if ((r = parse_text_string(it, &msg->series_unique_id)))
+                return r;
+        } else if (strcmp(key, "arm_date") == 0) {
+            if ((r = parse_text_string(it, &msg->arm_date)))
                 return r;
         } else if (strcmp(key, "beam_center_x") == 0) {
-            if ((r = parse_double(it, &event->beam_center_x)))
+            if ((r = parse_double(it, &msg->beam_center_x)))
                 return r;
         } else if (strcmp(key, "beam_center_y") == 0) {
-            if ((r = parse_double(it, &event->beam_center_y)))
+            if ((r = parse_double(it, &msg->beam_center_y)))
                 return r;
         } else if (strcmp(key, "channels") == 0) {
-            if ((r = parse_start_channels(it, &event->channels)))
+            if (!cbor_value_is_array(it))
+                return STREAM2_ERROR_PARSE;
+
+            size_t len;
+            if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
+                return r;
+
+            msg->channels.ptr = calloc(len, sizeof(char*));
+            if (msg->channels.ptr == NULL)
+                return STREAM2_ERROR_OUT_OF_MEMORY;
+
+            msg->channels.len = len;
+
+            CborValue elt;
+            if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
+                return r;
+
+            for (size_t i = 0; i < len; i++) {
+                if ((r = parse_text_string(&elt, &msg->channels.ptr[i])))
+                    return r;
+            }
+
+            if ((r = CBOR_RESULT(cbor_value_leave_container(it, &elt))))
                 return r;
         } else if (strcmp(key, "count_time") == 0) {
-            if ((r = parse_double(it, &event->count_time)))
+            if ((r = parse_double(it, &msg->count_time)))
                 return r;
-        } else if (strcmp(key, "countrate_correction") == 0) {
-            CborTag tag;
-            if ((r = parse_tag(it, &tag)))
+        } else if (strcmp(key, "countrate_correction_enabled") == 0) {
+            if ((r = parse_bool(it, &msg->countrate_correction_enabled)))
                 return r;
-
-            if (tag != TYPED_ARRAY_UINT32_LITTLE_ENDIAN)
-                return STREAM2_ERROR_PARSE;
-
-            if (!cbor_value_is_byte_string(it))
-                return STREAM2_ERROR_PARSE;
-
-            uint8_t* ptr;
-            size_t len;
-            if ((r = CBOR_RESULT(
-                         cbor_value_dup_byte_string(it, &ptr, &len, it))))
-                return r;
-            event->countrate_correction.ptr = (uint32_t*)ptr;
-            event->countrate_correction.len = len / sizeof(uint32_t);
-        } else if (strcmp(key, "countrate_correction_applied") == 0) {
-            if ((r = parse_bool(it, &event->countrate_correction_applied)))
+        } else if (strcmp(key, "countrate_correction_lookup_table") == 0) {
+            CborTag type = TYPED_ARRAY_UINT32_LITTLE_ENDIAN;
+            size_t elem_size;
+            if ((r = parse_typed_array(
+                         it,
+                         (struct stream2_array*)&msg
+                                 ->countrate_correction_lookup_table,
+                         &type, &elem_size)))
                 return r;
         } else if (strcmp(key, "detector_description") == 0) {
-            if ((r = parse_text_string(it, &event->detector_decription)))
-                return r;
-        } else if (strcmp(key, "detector_distance") == 0) {
-            if ((r = parse_double(it, &event->detector_distance)))
+            if ((r = parse_text_string(it, &msg->detector_description)))
                 return r;
         } else if (strcmp(key, "detector_serial_number") == 0) {
-            if ((r = parse_text_string(it, &event->detector_serial_number)))
+            if ((r = parse_text_string(it, &msg->detector_serial_number)))
+                return r;
+        } else if (strcmp(key, "detector_translation") == 0) {
+            if (!cbor_value_is_array(it))
+                return STREAM2_ERROR_PARSE;
+
+            size_t len;
+            if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
+                return r;
+
+            if (len != 3)
+                return STREAM2_ERROR_PARSE;
+
+            CborValue elt;
+            if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
+                return r;
+
+            for (size_t i = 0; i < len; i++) {
+                if ((r = parse_double(&elt, &msg->detector_translation[i])))
+                    return r;
+            }
+
+            if ((r = CBOR_RESULT(cbor_value_leave_container(it, &elt))))
                 return r;
         } else if (strcmp(key, "flatfield") == 0) {
             if (!cbor_value_is_map(it))
@@ -499,59 +560,57 @@ static enum stream2_result parse_start_event(CborValue* it,
             if ((r = CBOR_RESULT(cbor_value_get_map_length(it, &len))))
                 return r;
 
-            event->flatfield.ptr =
-                    calloc(len, sizeof(struct stream2_flatfield));
-            if (event->flatfield.ptr == NULL)
+            msg->flatfield.ptr = calloc(len, sizeof(struct stream2_flatfield));
+            if (msg->flatfield.ptr == NULL)
                 return STREAM2_ERROR_OUT_OF_MEMORY;
-            event->flatfield.len = len;
+
+            msg->flatfield.len = len;
 
             CborValue field;
             if ((r = CBOR_RESULT(cbor_value_enter_container(it, &field))))
                 return r;
 
             for (size_t i = 0; i < len; i++) {
-                if ((r = parse_uint64(&field,
-                                      &event->flatfield.ptr[i].threshold)))
+                if ((r = parse_text_string(&field,
+                                           &msg->flatfield.ptr[i].channel)))
                     return r;
-                CborTag data_tag;
+
+                CborTag type = TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN;
+                size_t elem_size;
                 if ((r = parse_multidim_array(
                              &field,
-                             (struct multidim_array*)&event->flatfield.ptr[i]
-                                     .array,
-                             false, &data_tag)))
+                             (struct stream2_multidim_array*)&msg->flatfield
+                                     .ptr[i]
+                                     .flatfield,
+                             &type, &elem_size)))
                     return r;
-                if (data_tag != TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN)
-                    return STREAM2_ERROR_PARSE;
             }
 
             if ((r = CBOR_RESULT(cbor_value_leave_container(it, &field))))
                 return r;
-        } else if (strcmp(key, "flatfield_applied") == 0) {
-            if ((r = parse_bool(it, &event->flatfield_applied)))
+        } else if (strcmp(key, "flatfield_enabled") == 0) {
+            if ((r = parse_bool(it, &msg->flatfield_enabled)))
                 return r;
         } else if (strcmp(key, "frame_time") == 0) {
-            if ((r = parse_double(it, &event->frame_time)))
+            if ((r = parse_double(it, &msg->frame_time)))
                 return r;
         } else if (strcmp(key, "goniometer") == 0) {
-            if ((r = parse_goniometer(it, &event->goniometer)))
+            if ((r = parse_goniometer(it, &msg->goniometer)))
                 return r;
-        } else if (strcmp(key, "image_size") == 0) {
-            if ((r = parse_array_2_uint64(it, event->image_size)))
+        } else if (strcmp(key, "image_size_x") == 0) {
+            if ((r = parse_uint64(it, &msg->image_size_x)))
                 return r;
-        } else if (strcmp(key, "images_per_trigger") == 0) {
-            if ((r = parse_uint64(it, &event->images_per_trigger)))
+        } else if (strcmp(key, "image_size_y") == 0) {
+            if ((r = parse_uint64(it, &msg->image_size_y)))
                 return r;
         } else if (strcmp(key, "incident_energy") == 0) {
-            if ((r = parse_double(it, &event->incident_energy)))
+            if ((r = parse_double(it, &msg->incident_energy)))
                 return r;
         } else if (strcmp(key, "incident_wavelength") == 0) {
-            if ((r = parse_double(it, &event->incident_wavelength)))
+            if ((r = parse_double(it, &msg->incident_wavelength)))
                 return r;
         } else if (strcmp(key, "number_of_images") == 0) {
-            if ((r = parse_uint64(it, &event->number_of_images)))
-                return r;
-        } else if (strcmp(key, "number_of_triggers") == 0) {
-            if ((r = parse_uint64(it, &event->number_of_triggers)))
+            if ((r = parse_uint64(it, &msg->number_of_images)))
                 return r;
         } else if (strcmp(key, "pixel_mask") == 0) {
             if (!cbor_value_is_map(it))
@@ -561,56 +620,52 @@ static enum stream2_result parse_start_event(CborValue* it,
             if ((r = CBOR_RESULT(cbor_value_get_map_length(it, &len))))
                 return r;
 
-            event->pixel_mask.ptr =
+            msg->pixel_mask.ptr =
                     calloc(len, sizeof(struct stream2_pixel_mask));
-            if (event->pixel_mask.ptr == NULL)
+            if (msg->pixel_mask.ptr == NULL)
                 return STREAM2_ERROR_OUT_OF_MEMORY;
-            event->pixel_mask.len = len;
+
+            msg->pixel_mask.len = len;
 
             CborValue field;
             if ((r = CBOR_RESULT(cbor_value_enter_container(it, &field))))
                 return r;
 
             for (size_t i = 0; i < len; i++) {
-                if ((r = parse_uint64(&field,
-                                      &event->pixel_mask.ptr[i].threshold)))
+                if ((r = parse_text_string(&field,
+                                           &msg->pixel_mask.ptr[i].channel)))
                     return r;
-                CborTag data_tag;
+
+                CborTag type = TYPED_ARRAY_UINT32_LITTLE_ENDIAN;
+                size_t elem_size;
                 if ((r = parse_multidim_array(
                              &field,
-                             (struct multidim_array*)&event->pixel_mask.ptr[i]
-                                     .array,
-                             false, &data_tag)))
+                             (struct stream2_multidim_array*)&msg->pixel_mask
+                                     .ptr[i]
+                                     .pixel_mask,
+                             &type, &elem_size)))
                     return r;
-                if (data_tag != TYPED_ARRAY_UINT32_LITTLE_ENDIAN)
-                    return STREAM2_ERROR_PARSE;
             }
 
             if ((r = CBOR_RESULT(cbor_value_leave_container(it, &field))))
                 return r;
-        } else if (strcmp(key, "pixel_mask_applied") == 0) {
-            if ((r = parse_bool(it, &event->pixel_mask_applied)))
+        } else if (strcmp(key, "pixel_mask_enabled") == 0) {
+            if ((r = parse_bool(it, &msg->pixel_mask_enabled)))
                 return r;
         } else if (strcmp(key, "pixel_size_x") == 0) {
-            if ((r = parse_double(it, &event->pixel_size_x)))
+            if ((r = parse_double(it, &msg->pixel_size_x)))
                 return r;
         } else if (strcmp(key, "pixel_size_y") == 0) {
-            if ((r = parse_double(it, &event->pixel_size_y)))
-                return r;
-        } else if (strcmp(key, "roi_mode") == 0) {
-            if ((r = parse_text_string(it, &event->roi_mode)))
+            if ((r = parse_double(it, &msg->pixel_size_y)))
                 return r;
         } else if (strcmp(key, "saturation_value") == 0) {
-            if ((r = parse_uint64(it, &event->saturation_value)))
+            if ((r = parse_uint64(it, &msg->saturation_value)))
                 return r;
         } else if (strcmp(key, "sensor_material") == 0) {
-            if ((r = parse_text_string(it, &event->sensor_material)))
+            if ((r = parse_text_string(it, &msg->sensor_material)))
                 return r;
         } else if (strcmp(key, "sensor_thickness") == 0) {
-            if ((r = parse_double(it, &event->sensor_thickness)))
-                return r;
-        } else if (strcmp(key, "series_date") == 0) {
-            if ((r = parse_text_string(it, &event->series_date)))
+            if ((r = parse_double(it, &msg->sensor_thickness)))
                 return r;
         } else if (strcmp(key, "threshold_energy") == 0) {
             if (!cbor_value_is_map(it))
@@ -620,30 +675,31 @@ static enum stream2_result parse_start_event(CborValue* it,
             if ((r = CBOR_RESULT(cbor_value_get_map_length(it, &len))))
                 return r;
 
-            event->threshold_energy.ptr =
+            msg->threshold_energy.ptr =
                     calloc(len, sizeof(struct stream2_threshold_energy));
-            if (event->threshold_energy.ptr == NULL)
+            if (msg->threshold_energy.ptr == NULL)
                 return STREAM2_ERROR_OUT_OF_MEMORY;
-            event->threshold_energy.len = len;
+
+            msg->threshold_energy.len = len;
 
             CborValue field;
             if ((r = CBOR_RESULT(cbor_value_enter_container(it, &field))))
                 return r;
 
             for (size_t i = 0; i < len; i++) {
-                if ((r = parse_uint64(
-                             &field,
-                             &event->threshold_energy.ptr[i].threshold)))
+                if ((r = parse_text_string(
+                             &field, &msg->threshold_energy.ptr[i].channel)))
                     return r;
+
                 if ((r = parse_double(&field,
-                                      &event->threshold_energy.ptr[i].energy)))
+                                      &msg->threshold_energy.ptr[i].energy)))
                     return r;
             }
 
             if ((r = CBOR_RESULT(cbor_value_leave_container(it, &field))))
                 return r;
-        } else if (strcmp(key, "virtual_pixel_correction_applied") == 0) {
-            if ((r = parse_bool(it, &event->virtual_pixel_correction_applied)))
+        } else if (strcmp(key, "virtual_pixel_interpolation_enabled") == 0) {
+            if ((r = parse_bool(it, &msg->virtual_pixel_interpolation_enabled)))
                 return r;
         } else {
             if ((r = CBOR_RESULT(cbor_value_advance(it))))
@@ -653,121 +709,78 @@ static enum stream2_result parse_start_event(CborValue* it,
     return STREAM2_OK;
 }
 
-static enum stream2_result parse_image_channel(
-        CborValue* it,
-        struct stream2_image_channel* channel) {
+static enum stream2_result parse_image_msg(CborValue* it,
+                                           struct stream2_msg** msg_out) {
     enum stream2_result r;
 
-    if (!cbor_value_is_map(it))
-        return STREAM2_ERROR_PARSE;
+    struct stream2_image_msg* msg = calloc(1, sizeof(struct stream2_image_msg));
+    *msg_out = (struct stream2_msg*)msg;
+    if (msg == NULL)
+        return STREAM2_ERROR_OUT_OF_MEMORY;
 
-    CborValue field;
-    if ((r = CBOR_RESULT(cbor_value_enter_container(it, &field))))
-        return r;
+    msg->type = STREAM2_MSG_IMAGE;
 
-    while (!cbor_value_at_end(&field)) {
+    while (cbor_value_is_valid(it)) {
         char key[MAX_KEY_LEN];
-        if ((r = parse_key(&field, key)))
+        if ((r = parse_key(it, key)))
             return r;
 
         if ((r = CBOR_RESULT(cbor_value_skip_tag(it))))
             return r;
 
-        if (strcmp(key, "compression") == 0) {
-            if ((r = parse_text_string(&field, &channel->compression)))
+        if (strcmp(key, "series_id") == 0) {
+            if ((r = parse_uint64(it, &msg->series_id)))
                 return r;
-        } else if (strcmp(key, "data_type") == 0) {
-            if ((r = parse_text_string(&field, &channel->data_type)))
+        } else if (strcmp(key, "series_unique_id") == 0) {
+            if ((r = parse_text_string(it, &msg->series_unique_id)))
                 return r;
-        } else if (strcmp(key, "lost_pixel_count") == 0) {
-            if ((r = parse_uint64(&field, &channel->lost_pixel_count)))
+        } else if (strcmp(key, "image_id") == 0) {
+            if ((r = parse_uint64(it, &msg->image_id)))
                 return r;
-        } else if (strcmp(key, "thresholds") == 0) {
-            if ((r = parse_array_uint64(&field, &channel->thresholds)))
+        } else if (strcmp(key, "real_time") == 0) {
+            if ((r = parse_array_2_uint64(it, msg->real_time)))
+                return r;
+        } else if (strcmp(key, "series_date") == 0) {
+            if ((r = parse_text_string(it, &msg->series_date)))
+                return r;
+        } else if (strcmp(key, "start_time") == 0) {
+            if ((r = parse_array_2_uint64(it, msg->start_time)))
+                return r;
+        } else if (strcmp(key, "stop_time") == 0) {
+            if ((r = parse_array_2_uint64(it, msg->stop_time)))
                 return r;
         } else if (strcmp(key, "data") == 0) {
-            CborTag data_tag;
-            if ((r = parse_multidim_array(&field, &channel->array, true,
-                                          &data_tag)))
+            if (!cbor_value_is_map(it))
+                return STREAM2_ERROR_PARSE;
+
+            size_t len;
+            if ((r = CBOR_RESULT(cbor_value_get_map_length(it, &len))))
                 return r;
-        } else {
-            if ((r = CBOR_RESULT(cbor_value_advance(it))))
+
+            msg->data.ptr = calloc(len, sizeof(struct stream2_image_data));
+            if (msg->data.ptr == NULL)
+                return STREAM2_ERROR_OUT_OF_MEMORY;
+
+            msg->data.len = len;
+
+            CborValue field;
+            if ((r = CBOR_RESULT(cbor_value_enter_container(it, &field))))
                 return r;
-        }
-    }
 
-    return CBOR_RESULT(cbor_value_leave_container(it, &field));
-}
+            for (size_t i = 0; i < len; i++) {
+                if ((r = parse_text_string(&field, &msg->data.ptr[i].channel)))
+                    return r;
 
-static enum stream2_result parse_image_channels(
-        CborValue* it,
-        struct stream2_image_channels* channels) {
-    enum stream2_result r;
+                CborTag type = UINT64_MAX;
+                if ((r = parse_multidim_array(
+                             &field,
+                             (struct stream2_multidim_array*)&msg->data.ptr[i]
+                                     .data,
+                             &type, &msg->data.ptr[i].elem_size)))
+                    return r;
+            }
 
-    if (!cbor_value_is_array(it))
-        return STREAM2_ERROR_PARSE;
-
-    size_t len;
-    if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
-        return r;
-
-    channels->ptr = calloc(len, sizeof(struct stream2_image_channel));
-    if (channels->ptr == NULL)
-        return STREAM2_ERROR_OUT_OF_MEMORY;
-    channels->len = len;
-
-    CborValue elt;
-    if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
-        return r;
-
-    for (size_t i = 0; i < len; i++) {
-        if ((r = parse_image_channel(&elt, &channels->ptr[i])))
-            return r;
-    }
-
-    return CBOR_RESULT(cbor_value_leave_container(it, &elt));
-}
-
-static enum stream2_result parse_image_event(CborValue* it,
-                                             struct stream2_event** e) {
-    enum stream2_result r;
-
-    struct stream2_image_event* event =
-            calloc(1, sizeof(struct stream2_image_event));
-    if (event == NULL)
-        return STREAM2_ERROR_OUT_OF_MEMORY;
-
-    *e = (struct stream2_event*)event;
-    event->type = STREAM2_EVENT_IMAGE;
-
-    while (cbor_value_is_valid(it)) {
-        char key[MAX_KEY_LEN];
-        if ((r = parse_key(it, key)))
-            return r;
-
-        if ((r = CBOR_RESULT(cbor_value_skip_tag(it))))
-            return r;
-
-        if (strcmp(key, "series_number") == 0) {
-            if ((r = parse_uint64(it, &event->series_number)))
-                return r;
-        } else if (strcmp(key, "series_unique_id") == 0) {
-            if ((r = parse_text_string(it, &event->series_unique_id)))
-                return r;
-        } else if (strcmp(key, "image_number") == 0) {
-            if ((r = parse_uint64(it, &event->image_number)))
-                return r;
-        } else if (strcmp(key, "hardware_start_time") == 0) {
-            if ((r = parse_array_2_uint64(it, event->hardware_start_time)))
-                return r;
-        } else if (strcmp(key, "hardware_stop_time") == 0) {
-            if ((r = parse_array_2_uint64(it, event->hardware_stop_time)))
-                return r;
-        } else if (strcmp(key, "hardware_exposure_time") == 0) {
-            if ((r = parse_array_2_uint64(it, event->hardware_exposure_time)))
-                return r;
-        } else if (strcmp(key, "channels") == 0) {
-            if ((r = parse_image_channels(it, &event->channels)))
+            if ((r = CBOR_RESULT(cbor_value_leave_container(it, &field))))
                 return r;
         } else {
             if ((r = CBOR_RESULT(cbor_value_advance(it))))
@@ -777,17 +790,16 @@ static enum stream2_result parse_image_event(CborValue* it,
     return STREAM2_OK;
 }
 
-static enum stream2_result parse_end_event(CborValue* it,
-                                           struct stream2_event** e) {
+static enum stream2_result parse_end_msg(CborValue* it,
+                                         struct stream2_msg** msg_out) {
     enum stream2_result r;
 
-    struct stream2_end_event* event =
-            calloc(1, sizeof(struct stream2_end_event));
-    if (event == NULL)
+    struct stream2_end_msg* msg = calloc(1, sizeof(struct stream2_end_msg));
+    *msg_out = (struct stream2_msg*)msg;
+    if (msg == NULL)
         return STREAM2_ERROR_OUT_OF_MEMORY;
 
-    *e = (struct stream2_event*)event;
-    event->type = STREAM2_EVENT_END;
+    msg->type = STREAM2_MSG_END;
 
     while (cbor_value_is_valid(it)) {
         char key[MAX_KEY_LEN];
@@ -797,11 +809,11 @@ static enum stream2_result parse_end_event(CborValue* it,
         if ((r = CBOR_RESULT(cbor_value_skip_tag(it))))
             return r;
 
-        if (strcmp(key, "series_number") == 0) {
-            if ((r = parse_uint64(it, &event->series_number)))
+        if (strcmp(key, "series_id") == 0) {
+            if ((r = parse_uint64(it, &msg->series_id)))
                 return r;
         } else if (strcmp(key, "series_unique_id") == 0) {
-            if ((r = parse_text_string(it, &event->series_unique_id)))
+            if ((r = parse_text_string(it, &msg->series_unique_id)))
                 return r;
         } else {
             if ((r = CBOR_RESULT(cbor_value_advance(it))))
@@ -811,8 +823,8 @@ static enum stream2_result parse_end_event(CborValue* it,
     return STREAM2_OK;
 }
 
-static enum stream2_result parse_event_type(CborValue* it,
-                                            char type[MAX_KEY_LEN]) {
+static enum stream2_result parse_msg_type(CborValue* it,
+                                          char type[MAX_KEY_LEN]) {
     enum stream2_result r;
 
     char key[MAX_KEY_LEN];
@@ -828,22 +840,22 @@ static enum stream2_result parse_event_type(CborValue* it,
     return parse_key(it, type);
 }
 
-static enum stream2_result parse_event(const uint8_t* message,
-                                       size_t size,
-                                       struct stream2_event** event) {
+static enum stream2_result parse_msg(const uint8_t* buffer,
+                                     size_t size,
+                                     struct stream2_msg** msg_out) {
     enum stream2_result r;
 
     // https://www.rfc-editor.org/rfc/rfc8949.html#name-self-described-cbor
     const uint8_t MAGIC[3] = {0xd9, 0xd9, 0xf7};
-    if (size < sizeof(MAGIC) || memcmp(message, MAGIC, sizeof(MAGIC)) != 0)
+    if (size < sizeof(MAGIC) || memcmp(buffer, MAGIC, sizeof(MAGIC)) != 0)
         return STREAM2_ERROR_SIGNATURE;
 
-    message += sizeof(MAGIC);
+    buffer += sizeof(MAGIC);
     size -= sizeof(MAGIC);
 
     CborParser parser;
     CborValue it;
-    if ((r = CBOR_RESULT(cbor_parser_init(message, size, 0, &parser, &it))))
+    if ((r = CBOR_RESULT(cbor_parser_init(buffer, size, 0, &parser, &it))))
         return r;
 
     if (!cbor_value_is_map(&it))
@@ -854,17 +866,17 @@ static enum stream2_result parse_event(const uint8_t* message,
         return r;
 
     char type[MAX_KEY_LEN];
-    if ((r = parse_event_type(&field, type)))
+    if ((r = parse_msg_type(&field, type)))
         return r;
 
     if (strcmp(type, "start") == 0) {
-        if ((r = parse_start_event(&field, event)))
+        if ((r = parse_start_msg(&field, msg_out)))
             return r;
     } else if (strcmp(type, "image") == 0) {
-        if ((r = parse_image_event(&field, event)))
+        if ((r = parse_image_msg(&field, msg_out)))
             return r;
     } else if (strcmp(type, "end") == 0) {
-        if ((r = parse_end_event(&field, event)))
+        if ((r = parse_end_msg(&field, msg_out)))
             return r;
     } else {
         return STREAM2_ERROR_PARSE;
@@ -873,62 +885,66 @@ static enum stream2_result parse_event(const uint8_t* message,
     return CBOR_RESULT(cbor_value_leave_container(&it, &field));
 }
 
-enum stream2_result stream2_parse_event(const uint8_t* message,
-                                        size_t size,
-                                        struct stream2_event** event) {
+enum stream2_result stream2_parse_msg(const uint8_t* buffer,
+                                      size_t size,
+                                      struct stream2_msg** msg_out) {
     enum stream2_result r;
 
-    if ((r = parse_event(message, size, event))) {
-        if (*event) {
-            stream2_free_event(*event);
-            *event = NULL;
+    *msg_out = NULL;
+    if ((r = parse_msg(buffer, size, msg_out))) {
+        if (*msg_out) {
+            stream2_free_msg(*msg_out);
+            *msg_out = NULL;
         }
         return r;
     }
     return STREAM2_OK;
 }
 
-static void free_start_event(struct stream2_start_event* event) {
-    for (size_t i = 0; i < event->channels.len; i++) {
-        free(event->channels.ptr[i].data_type);
-        free(event->channels.ptr[i].thresholds.ptr);
+static void free_start_msg(struct stream2_start_msg* msg) {
+    free(msg->arm_date);
+    for (size_t i = 0; i < msg->channels.len; i++)
+        free(msg->channels.ptr[i]);
+    free(msg->channels.ptr);
+    free(msg->countrate_correction_lookup_table.ptr);
+    free(msg->detector_description);
+    free(msg->detector_serial_number);
+    for (size_t i = 0; i < msg->flatfield.len; i++) {
+        free(msg->flatfield.ptr[i].channel);
+        free(msg->flatfield.ptr[i].flatfield.array.ptr);
     }
-    free(event->channels.ptr);
-    free(event->countrate_correction.ptr);
-    free(event->detector_decription);
-    free(event->detector_serial_number);
-    for (size_t i = 0; i < event->flatfield.len; i++)
-        free(event->flatfield.ptr[i].array.data);
-    free(event->flatfield.ptr);
-    for (size_t i = 0; i < event->pixel_mask.len; i++)
-        free(event->pixel_mask.ptr[i].array.data);
-    free(event->pixel_mask.ptr);
-    free(event->roi_mode);
-    free(event->sensor_material);
-    free(event->series_date);
-    free(event->threshold_energy.ptr);
+    free(msg->flatfield.ptr);
+    for (size_t i = 0; i < msg->pixel_mask.len; i++) {
+        free(msg->pixel_mask.ptr[i].channel);
+        free(msg->pixel_mask.ptr[i].pixel_mask.array.ptr);
+    }
+    free(msg->pixel_mask.ptr);
+    free(msg->sensor_material);
+    for (size_t i = 0; i < msg->threshold_energy.len; i++)
+        free(msg->threshold_energy.ptr[i].channel);
+    free(msg->threshold_energy.ptr);
 }
 
-static void free_image_event(struct stream2_image_event* event) {
-    for (size_t i = 0; i < event->channels.len; i++) {
-        free(event->channels.ptr[i].compression);
-        free(event->channels.ptr[i].data_type);
-        free(event->channels.ptr[i].thresholds.ptr);
+static void free_image_msg(struct stream2_image_msg* msg) {
+    free(msg->series_date);
+    for (size_t i = 0; i < msg->data.len; i++) {
+        free(msg->data.ptr[i].channel);
+        free(msg->data.ptr[i].data.array.ptr);
     }
-    free(event->channels.ptr);
+    free(msg->data.ptr);
 }
 
-void stream2_free_event(struct stream2_event* event) {
-    switch (event->type) {
-        case STREAM2_EVENT_START:
-            free_start_event((struct stream2_start_event*)event);
+void stream2_free_msg(struct stream2_msg* msg) {
+    switch (msg->type) {
+        case STREAM2_MSG_START:
+            free_start_msg((struct stream2_start_msg*)msg);
             break;
-        case STREAM2_EVENT_IMAGE:
-            free_image_event((struct stream2_image_event*)event);
+        case STREAM2_MSG_IMAGE:
+            free_image_msg((struct stream2_image_msg*)msg);
             break;
-        case STREAM2_EVENT_END:
+        case STREAM2_MSG_END:
             break;
     }
-    free(event->series_unique_id);
-    free(event);
+    free(msg->series_unique_id);
+    free(msg);
 }

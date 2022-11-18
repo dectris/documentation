@@ -19,7 +19,7 @@ Stream V2 supersedes Stream V1. Although Stream V1 will continue to be supported
 
 Stream V2 can be enabled and configured using the SIMPLON API.
 
-#### SIMPLON Stream Configuration Parameters
+#### SIMPLON Configuration Parameters
 
 The configuration interface is accessible at `http://<ADDRESS_OF_DCU>/stream/api/1.8.0/config`.
 

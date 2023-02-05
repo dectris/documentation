@@ -159,6 +159,40 @@ static enum stream2_result parse_uint64(CborValue* it, uint64_t* value) {
     return CBOR_RESULT(cbor_value_advance_fixed(it));
 }
 
+static enum stream2_result parse_text_string(CborValue* it, char** tstr) {
+    if (!cbor_value_is_text_string(it))
+        return STREAM2_ERROR_PARSE;
+
+    size_t len;
+    return CBOR_RESULT(cbor_value_dup_text_string(it, tstr, &len, it));
+}
+
+static enum stream2_result parse_array_2_uint64(CborValue* it,
+                                                uint64_t array[2]) {
+    enum stream2_result r;
+
+    if (!cbor_value_is_array(it))
+        return STREAM2_ERROR_PARSE;
+
+    size_t len;
+    if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
+        return r;
+
+    if (len != 2)
+        return STREAM2_ERROR_PARSE;
+
+    CborValue elt;
+    if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
+        return r;
+
+    for (size_t i = 0; i < len; i++) {
+        if ((r = parse_uint64(&elt, &array[i])))
+            return r;
+    }
+
+    return CBOR_RESULT(cbor_value_leave_container(it, &elt));
+}
+
 static enum stream2_result parse_dectris_compression(CborValue* it,
                                                      uint8_t** bstr,
                                                      size_t* bstr_len) {
@@ -251,40 +285,6 @@ static enum stream2_result parse_byte_string(CborValue* it,
         return STREAM2_ERROR_PARSE;
 
     return CBOR_RESULT(cbor_value_dup_byte_string(it, bstr, bstr_len, it));
-}
-
-static enum stream2_result parse_text_string(CborValue* it, char** tstr) {
-    if (!cbor_value_is_text_string(it))
-        return STREAM2_ERROR_PARSE;
-
-    size_t len;
-    return CBOR_RESULT(cbor_value_dup_text_string(it, tstr, &len, it));
-}
-
-static enum stream2_result parse_array_2_uint64(CborValue* it,
-                                                uint64_t array[2]) {
-    enum stream2_result r;
-
-    if (!cbor_value_is_array(it))
-        return STREAM2_ERROR_PARSE;
-
-    size_t len;
-    if ((r = CBOR_RESULT(cbor_value_get_array_length(it, &len))))
-        return r;
-
-    if (len != 2)
-        return STREAM2_ERROR_PARSE;
-
-    CborValue elt;
-    if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
-        return r;
-
-    for (size_t i = 0; i < len; i++) {
-        if ((r = parse_uint64(&elt, &array[i])))
-            return r;
-    }
-
-    return CBOR_RESULT(cbor_value_leave_container(it, &elt));
 }
 
 // Parses a typed array from [RFC 8746 section 2].

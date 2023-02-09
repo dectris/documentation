@@ -14,15 +14,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "compression/src/compression.h"
 #include "tinycbor/src/cbor.h"
 
 enum { MAX_KEY_LEN = 64 };
 
 static const CborTag MULTI_DIMENSIONAL_ARRAY_ROW_MAJOR = 40;
-static const CborTag TYPED_ARRAY_UINT32_LITTLE_ENDIAN = 70;
-static const CborTag TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN = 85;
 static const CborTag DECTRIS_COMPRESSION = 56500;
+
+static uint64_t read_u64_be(const uint8_t* buf) {
+    return ((uint64_t)buf[0] << 56) | ((uint64_t)buf[1] << 48) |
+           ((uint64_t)buf[2] << 40) | ((uint64_t)buf[3] << 32) |
+           ((uint64_t)buf[4] << 24) | ((uint64_t)buf[5] << 16) |
+           ((uint64_t)buf[6] << 8) | (uint64_t)buf[7];
+}
 
 static enum stream2_result CBOR_RESULT(CborError e) {
     switch (e) {
@@ -193,9 +197,11 @@ static enum stream2_result parse_array_2_uint64(CborValue* it,
     return CBOR_RESULT(cbor_value_leave_container(it, &elt));
 }
 
-static enum stream2_result parse_dectris_compression(CborValue* it,
-                                                     uint8_t** bstr,
-                                                     size_t* bstr_len) {
+static enum stream2_result parse_dectris_compression(
+        CborValue* it,
+        struct stream2_compression* compression,
+        const uint8_t** bstr,
+        size_t* bstr_len) {
     enum stream2_result r;
 
     CborTag tag;
@@ -219,54 +225,34 @@ static enum stream2_result parse_dectris_compression(CborValue* it,
     if ((r = CBOR_RESULT(cbor_value_enter_container(it, &elt))))
         return r;
 
-    char key[MAX_KEY_LEN];
-    if ((r = parse_key(&elt, key)))
+    if ((r = parse_text_string(&elt, &compression->algorithm)))
         return r;
 
-    CompressionAlgorithm algorithm;
-    if (strcmp(key, "bslz4") == 0) {
-        algorithm = COMPRESSION_BSLZ4_HDF5;
-    } else if (strcmp(key, "lz4") == 0) {
-        algorithm = COMPRESSION_LZ4_HDF5;
-    } else {
-        return STREAM2_ERROR_PARSE;
-    }
-
-    uint64_t elem_size;
-    if ((r = parse_uint64(&elt, &elem_size)))
+    if ((r = parse_uint64(&elt, &compression->elem_size)))
         return r;
-
-    if (elem_size > SIZE_MAX)
-        return STREAM2_ERROR_PARSE;
 
     if (!cbor_value_is_byte_string(&elt))
         return STREAM2_ERROR_PARSE;
 
-    const uint8_t* encoded;
-    size_t encoded_len;
-    if ((r = consume_byte_string_nocopy(&elt, &encoded, &encoded_len, &elt)))
+    if ((r = consume_byte_string_nocopy(&elt, bstr, bstr_len, &elt)))
         return r;
 
-    *bstr_len = compression_decompress_buffer(
-            algorithm, NULL, 0, (const char*)encoded, encoded_len, elem_size);
-    if (*bstr_len == COMPRESSION_ERROR)
-        return STREAM2_ERROR_DECODE;
-
-    *bstr = malloc(*bstr_len);
-    if (*bstr == NULL)
-        return STREAM2_ERROR_OUT_OF_MEMORY;
-
-    if (compression_decompress_buffer(algorithm, (char*)*bstr, *bstr_len,
-                                      (const char*)encoded, encoded_len,
-                                      elem_size) != *bstr_len)
-        return STREAM2_ERROR_DECODE;
+    // https://github.com/dectris/compression/blob/v0.2.3/src/compression.c#L42
+    if (strcmp(compression->algorithm, "bslz4") == 0 ||
+        strcmp(compression->algorithm, "lz4") == 0)
+    {
+        if (*bstr_len < 12)
+            return STREAM2_ERROR_DECODE;
+        compression->orig_size = read_u64_be(*bstr);
+    } else {
+        return STREAM2_ERROR_NOT_IMPLEMENTED;
+    }
 
     return CBOR_RESULT(cbor_value_leave_container(it, &elt));
 }
 
-static enum stream2_result parse_byte_string(CborValue* it,
-                                             uint8_t** bstr,
-                                             size_t* bstr_len) {
+static enum stream2_result parse_bytes(CborValue* it,
+                                       struct stream2_bytes* bytes) {
     enum stream2_result r;
 
     if (cbor_value_is_tag(it)) {
@@ -275,7 +261,8 @@ static enum stream2_result parse_byte_string(CborValue* it,
             return r;
 
         if (tag == DECTRIS_COMPRESSION) {
-            return parse_dectris_compression(it, bstr, bstr_len);
+            return parse_dectris_compression(it, &bytes->compression,
+                                             &bytes->ptr, &bytes->len);
         } else {
             return STREAM2_ERROR_PARSE;
         }
@@ -284,7 +271,11 @@ static enum stream2_result parse_byte_string(CborValue* it,
     if (!cbor_value_is_byte_string(it))
         return STREAM2_ERROR_PARSE;
 
-    return CBOR_RESULT(cbor_value_dup_byte_string(it, bstr, bstr_len, it));
+    bytes->compression.algorithm = NULL;
+    bytes->compression.elem_size = 0;
+    bytes->compression.orig_size = 0;
+
+    return consume_byte_string_nocopy(it, &bytes->ptr, &bytes->len, it);
 }
 
 // Parses a typed array from [RFC 8746 section 2].
@@ -292,35 +283,30 @@ static enum stream2_result parse_byte_string(CborValue* it,
 // [RFC 8746 section 2]:
 // https://www.rfc-editor.org/rfc/rfc8746.html#name-typed-arrays
 static enum stream2_result parse_typed_array(CborValue* it,
-                                             struct stream2_array* array,
-                                             CborTag* type_tag,
-                                             size_t* elem_size) {
+                                             struct stream2_typed_array* array,
+                                             uint64_t* len) {
     enum stream2_result r;
 
-    CborTag tag;
-    if ((r = parse_tag(it, &tag)))
+    if ((r = parse_tag(it, &array->tag)))
         return r;
 
-    if (tag < 64 || tag > 87)
-        return STREAM2_ERROR_PARSE;
-
-    if (*type_tag != UINT64_MAX && tag != *type_tag)
-        return STREAM2_ERROR_PARSE;
-    *type_tag = tag;
-    // https://www.rfc-editor.org/rfc/rfc8746.html#name-types-of-numbers
-    const uint64_t f = (tag >> 4) & 1;
-    const uint64_t ll = tag & 3;
-    *elem_size = 1 << (f + ll);
-
-    size_t len;
-    if ((r = parse_byte_string(it, (uint8_t**)&array->ptr, &len)))
+    if ((r = parse_bytes(it, &array->data)))
         return r;
 
-    if (len % *elem_size != 0)
+    uint64_t elem_size;
+    if ((r = stream2_typed_array_elem_size(array, &elem_size)))
+        return r;
+
+    uint64_t size;
+    if (array->data.compression.algorithm == NULL)
+        size = array->data.len;
+    else
+        size = array->data.compression.orig_size;
+
+    if (size % elem_size != 0)
         return STREAM2_ERROR_PARSE;
 
-    array->len = len / *elem_size;
-
+    *len = size / elem_size;
     return STREAM2_OK;
 }
 
@@ -330,9 +316,7 @@ static enum stream2_result parse_typed_array(CborValue* it,
 // https://www.rfc-editor.org/rfc/rfc8746.html#name-row-major-order
 static enum stream2_result parse_multidim_array(
         CborValue* it,
-        struct stream2_multidim_array* multidim,
-        CborTag* type_tag,
-        size_t* elem_size) {
+        struct stream2_multidim_array* multidim) {
     enum stream2_result r;
 
     CborTag tag;
@@ -359,10 +343,11 @@ static enum stream2_result parse_multidim_array(
     if ((r = parse_array_2_uint64(&elt, multidim->dim)))
         return r;
 
-    if ((r = parse_typed_array(&elt, &multidim->array, type_tag, elem_size)))
+    uint64_t array_len;
+    if ((r = parse_typed_array(&elt, &multidim->array, &array_len)))
         return r;
 
-    if (multidim->dim[0] * multidim->dim[1] != multidim->array.len)
+    if (multidim->dim[0] * multidim->dim[1] != array_len)
         return STREAM2_ERROR_PARSE;
 
     return CBOR_RESULT(cbor_value_leave_container(it, &elt));
@@ -457,6 +442,7 @@ static enum stream2_result parse_start_msg(CborValue* it,
         return STREAM2_ERROR_OUT_OF_MEMORY;
 
     msg->type = STREAM2_MSG_START;
+    msg->countrate_correction_lookup_table.tag = UINT64_MAX;
 
     while (cbor_value_is_valid(it)) {
         char key[MAX_KEY_LEN];
@@ -516,13 +502,9 @@ static enum stream2_result parse_start_msg(CborValue* it,
             if ((r = parse_bool(it, &msg->countrate_correction_enabled)))
                 return r;
         } else if (strcmp(key, "countrate_correction_lookup_table") == 0) {
-            CborTag type = TYPED_ARRAY_UINT32_LITTLE_ENDIAN;
-            size_t elem_size;
+            uint64_t len;
             if ((r = parse_typed_array(
-                         it,
-                         (struct stream2_array*)&msg
-                                 ->countrate_correction_lookup_table,
-                         &type, &elem_size)))
+                         it, &msg->countrate_correction_lookup_table, &len)))
                 return r;
         } else if (strcmp(key, "detector_description") == 0) {
             if ((r = parse_text_string(it, &msg->detector_description)))
@@ -575,14 +557,8 @@ static enum stream2_result parse_start_msg(CborValue* it,
                                            &msg->flatfield.ptr[i].channel)))
                     return r;
 
-                CborTag type = TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN;
-                size_t elem_size;
                 if ((r = parse_multidim_array(
-                             &field,
-                             (struct stream2_multidim_array*)&msg->flatfield
-                                     .ptr[i]
-                                     .flatfield,
-                             &type, &elem_size)))
+                             &field, &msg->flatfield.ptr[i].flatfield)))
                     return r;
             }
 
@@ -636,14 +612,8 @@ static enum stream2_result parse_start_msg(CborValue* it,
                                            &msg->pixel_mask.ptr[i].channel)))
                     return r;
 
-                CborTag type = TYPED_ARRAY_UINT32_LITTLE_ENDIAN;
-                size_t elem_size;
                 if ((r = parse_multidim_array(
-                             &field,
-                             (struct stream2_multidim_array*)&msg->pixel_mask
-                                     .ptr[i]
-                                     .pixel_mask,
-                             &type, &elem_size)))
+                             &field, &msg->pixel_mask.ptr[i].pixel_mask)))
                     return r;
             }
 
@@ -771,12 +741,7 @@ static enum stream2_result parse_image_msg(CborValue* it,
                 if ((r = parse_text_string(&field, &msg->data.ptr[i].channel)))
                     return r;
 
-                CborTag type = UINT64_MAX;
-                if ((r = parse_multidim_array(
-                             &field,
-                             (struct stream2_multidim_array*)&msg->data.ptr[i]
-                                     .data,
-                             &type, &msg->data.ptr[i].elem_size)))
+                if ((r = parse_multidim_array(&field, &msg->data.ptr[i].data)))
                     return r;
             }
 
@@ -906,17 +871,18 @@ static void free_start_msg(struct stream2_start_msg* msg) {
     for (size_t i = 0; i < msg->channels.len; i++)
         free(msg->channels.ptr[i]);
     free(msg->channels.ptr);
-    free(msg->countrate_correction_lookup_table.ptr);
+    free(msg->countrate_correction_lookup_table.data.compression.algorithm);
     free(msg->detector_description);
     free(msg->detector_serial_number);
     for (size_t i = 0; i < msg->flatfield.len; i++) {
         free(msg->flatfield.ptr[i].channel);
-        free(msg->flatfield.ptr[i].flatfield.array.ptr);
+        free(msg->flatfield.ptr[i].flatfield.array.data.compression.algorithm);
     }
     free(msg->flatfield.ptr);
     for (size_t i = 0; i < msg->pixel_mask.len; i++) {
         free(msg->pixel_mask.ptr[i].channel);
-        free(msg->pixel_mask.ptr[i].pixel_mask.array.ptr);
+        free(msg->pixel_mask.ptr[i]
+                     .pixel_mask.array.data.compression.algorithm);
     }
     free(msg->pixel_mask.ptr);
     free(msg->sensor_material);
@@ -929,7 +895,7 @@ static void free_image_msg(struct stream2_image_msg* msg) {
     free(msg->series_date);
     for (size_t i = 0; i < msg->data.len; i++) {
         free(msg->data.ptr[i].channel);
-        free(msg->data.ptr[i].data.array.ptr);
+        free(msg->data.ptr[i].data.array.data.compression.algorithm);
     }
     free(msg->data.ptr);
 }
@@ -947,4 +913,17 @@ void stream2_free_msg(struct stream2_msg* msg) {
     }
     free(msg->series_unique_id);
     free(msg);
+}
+
+enum stream2_result stream2_typed_array_elem_size(
+        const struct stream2_typed_array* array,
+        uint64_t* elem_size) {
+    // https://www.rfc-editor.org/rfc/rfc8746.html#name-types-of-numbers
+    if (array->tag >= 64 && array->tag <= 87) {
+        const uint64_t f = (array->tag >> 4) & 1;
+        const uint64_t ll = array->tag & 3;
+        *elem_size = 1 << (f + ll);
+        return STREAM2_OK;
+    }
+    return STREAM2_ERROR_NOT_IMPLEMENTED;
 }

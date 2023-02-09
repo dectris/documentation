@@ -1,10 +1,188 @@
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zmq.h>
 
+#include "compression/src/compression.h"
 #include "stream2.h"
+
+static enum stream2_result decode_bytes(const struct stream2_bytes* bytes,
+                                        const unsigned char** decoded,
+                                        size_t* decoded_len,
+                                        void** decompress_buffer) {
+    const struct stream2_compression compression = bytes->compression;
+
+    if (compression.algorithm == NULL) {
+        *decoded = (const unsigned char*)bytes->ptr;
+        *decoded_len = bytes->len;
+        *decompress_buffer = NULL;
+        return STREAM2_OK;
+    }
+
+    CompressionAlgorithm algorithm;
+    if (strcmp(compression.algorithm, "bslz4") == 0) {
+        algorithm = COMPRESSION_BSLZ4_HDF5;
+    } else if (strcmp(compression.algorithm, "lz4") == 0) {
+        algorithm = COMPRESSION_LZ4_HDF5;
+    } else {
+        return STREAM2_ERROR_NOT_IMPLEMENTED;
+    }
+
+    const size_t len = compression_decompress_buffer(
+            algorithm, NULL, 0, (const char*)bytes->ptr, bytes->len,
+            compression.elem_size);
+    if (len == COMPRESSION_ERROR)
+        return STREAM2_ERROR_DECODE;
+
+    void* buffer = malloc(len);
+    if (!buffer)
+        return STREAM2_ERROR_OUT_OF_MEMORY;
+
+    if (compression_decompress_buffer(algorithm, (char*)buffer, len,
+                                      (const char*)bytes->ptr, bytes->len,
+                                      compression.elem_size) != len)
+    {
+        free(buffer);
+        return STREAM2_ERROR_DECODE;
+    }
+
+    *decoded = (const unsigned char*)buffer;
+    *decoded_len = len;
+    *decompress_buffer = buffer;
+    return STREAM2_OK;
+}
+
+static enum stream2_result decode_typed_array(
+        const struct stream2_typed_array* array,
+        const unsigned char** data,
+        size_t* len,
+        size_t* elem_size,
+        void** decompress_buffer) {
+    enum stream2_result r;
+
+    uint64_t elem_size64;
+    if ((r = stream2_typed_array_elem_size(array, &elem_size64)))
+        return r;
+
+    if (elem_size64 > SIZE_MAX)
+        return STREAM2_ERROR_NOT_IMPLEMENTED;
+
+    *elem_size = elem_size64;
+
+    if ((r = decode_bytes(&array->data, data, len, decompress_buffer)))
+        return r;
+
+    *len /= *elem_size;
+
+    return STREAM2_OK;
+}
+
+static int print_typed_array_type(const struct stream2_typed_array* array) {
+    switch (array->tag) {
+        case STREAM2_TYPED_ARRAY_UINT8:
+            return printf("uint8");
+        case STREAM2_TYPED_ARRAY_UINT16_LITTLE_ENDIAN:
+            return printf("uint16le");
+        case STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN:
+            return printf("uint32le");
+        case STREAM2_TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN:
+            return printf("float32le");
+        default:
+            return printf("%" PRIu64, array->tag);
+    }
+}
+
+static void print_multidim_array(
+        const struct stream2_multidim_array* multidim) {
+    enum stream2_result r;
+    const unsigned char* data;
+    size_t len;
+    size_t elem_size;
+    void* buffer;
+    if ((r = decode_typed_array(&multidim->array, &data, &len, &elem_size,
+                                &buffer)))
+    {
+        printf("error %i\n", (int)r);
+        return;
+    }
+    printf("dim [%" PRIu64 " %" PRIu64 "] type ", multidim->dim[0],
+           multidim->dim[1]);
+    print_typed_array_type(&multidim->array);
+    printf("\n");
+
+    uint64_t ce = multidim->dim[1];
+    int c_width;
+    switch (multidim->array.tag) {
+        default:
+        case STREAM2_TYPED_ARRAY_UINT8:
+            ce = multidim->dim[1] * elem_size;
+            c_width = 2;
+            break;
+        case STREAM2_TYPED_ARRAY_UINT16_LITTLE_ENDIAN:
+            c_width = 4;
+            break;
+        case STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN:
+            c_width = 8;
+            break;
+        case STREAM2_TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN:
+            c_width = 5;
+            break;
+    }
+    const int COLS = 80;
+    const uint64_t c_mid = ((COLS - 3) / (c_width + 1) & ~1) / 2;
+    const uint64_t r_mid = 20 / 2;
+    for (uint64_t ri = 0, re = multidim->dim[0]; ri < re; ri++, printf("\n")) {
+        if (ri == r_mid && re > r_mid * 2) {
+            ri = re - r_mid - 1;
+            for (uint64_t ci = 0; ci < ce; ci++) {
+                if (ci == c_mid && ce > c_mid * 2) {
+                    ci = ce - c_mid - 1;
+                    printf(":: ");
+                    continue;
+                }
+                printf(":%*s: ", c_width - 2, "");
+            }
+            continue;
+        }
+        for (uint64_t ci = 0; ci < ce; ci++) {
+            if (ci == c_mid && ce > c_mid * 2) {
+                ci = ce - c_mid - 1;
+                printf(".. ");
+                continue;
+            }
+            switch (multidim->array.tag) {
+                default:
+                case STREAM2_TYPED_ARRAY_UINT8:
+                    printf("%02" PRIx8 " ", data[ri * ce + ci]);
+                    break;
+                case STREAM2_TYPED_ARRAY_UINT16_LITTLE_ENDIAN: {
+                    uint16_t v;
+                    memcpy(&v, data + (ri * ce + ci) * elem_size, sizeof(v));
+                    printf("%04" PRIx16 " ", v);
+                    break;
+                }
+                case STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN: {
+                    uint32_t v;
+                    memcpy(&v, data + (ri * ce + ci) * elem_size, sizeof(v));
+                    printf("%08" PRIx32 " ", v);
+                    break;
+                }
+                case STREAM2_TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN: {
+                    float v;
+                    memcpy(&v, data + (ri * ce + ci) * elem_size, sizeof(v));
+                    if (v >= 0.f && v < 10.f)
+                        printf("%.3f ", v != 0.f ? v : 0.f);
+                    else
+                        printf("##### ");
+                    break;
+                }
+            }
+        }
+    }
+    free(buffer);
+}
 
 static void handle_start_msg(struct stream2_start_msg* msg) {
     printf("\nSTART MESSAGE: series_id %" PRIu64 " series_unique_id %s\n",
@@ -22,15 +200,32 @@ static void handle_start_msg(struct stream2_start_msg* msg) {
     printf("count_time: %f\n", msg->count_time);
     printf("countrate_correction_enabled: %s\n",
            msg->countrate_correction_enabled ? "true" : "false");
-    if (msg->countrate_correction_lookup_table.ptr) {
-        printf("countrate_correction_lookup_table: %zu entries cutoff %" PRIu32
-               "\n",
-               msg->countrate_correction_lookup_table.len,
-               msg->countrate_correction_lookup_table.len >= 2
-                       ? msg->countrate_correction_lookup_table.ptr
-                                 [msg->countrate_correction_lookup_table.len -
-                                  2]
-                       : 0);
+    {
+        enum stream2_result r;
+        const unsigned char* array;
+        size_t len;
+        size_t elem_size;
+        void* buffer;
+        if (msg->countrate_correction_lookup_table.tag !=
+            STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN)
+        {
+            printf("countrate_correction_lookup_table: error: unexpected tag "
+                   "%" PRIu64 "\n",
+                   msg->countrate_correction_lookup_table.tag);
+        } else if ((r = decode_typed_array(
+                            &msg->countrate_correction_lookup_table, &array,
+                            &len, &elem_size, &buffer)))
+        {
+            printf("countrate_correction_lookup_table: error %i\n", (int)r);
+        } else {
+            uint32_t cutoff = 0;
+            if (len >= 2)
+                memcpy(&cutoff, array + (len - 2) * elem_size, sizeof(cutoff));
+            printf("countrate_correction_lookup_table: %zu entries cutoff "
+                   "%" PRIu32 "\n",
+                   len, cutoff);
+            free(buffer);
+        }
     }
     printf("detector_description: \"%s\"\n",
            msg->detector_description ? msg->detector_description : "");
@@ -40,39 +235,8 @@ static void handle_start_msg(struct stream2_start_msg* msg) {
            msg->detector_translation[1], msg->detector_translation[2]);
     for (size_t i = 0; i < msg->flatfield.len; i++) {
         struct stream2_flatfield* flatfield = &msg->flatfield.ptr[i];
-        printf("flatfield: \"%s\" dim [%" PRIu64 " %" PRIu64 "]\n",
-               flatfield->channel, flatfield->flatfield.dim[0],
-               flatfield->flatfield.dim[1]);
-        for (uint64_t ri = 0, re = flatfield->flatfield.dim[0]; ri < re; ri++) {
-            if (ri == 6 && re > 13) {
-                ri = re - 6 - 1;
-                for (uint64_t ci = 0, ce = flatfield->flatfield.dim[1]; ci < ce;
-                     ci++) {
-                    if (ci == 6 && ce > 13) {
-                        ci = ce - 6 - 1;
-                        printf(":: ");
-                        continue;
-                    }
-                    printf(":   : ");
-                }
-            } else {
-                for (uint64_t ci = 0, ce = flatfield->flatfield.dim[1]; ci < ce;
-                     ci++) {
-                    if (ci == 6 && ce > 13) {
-                        ci = ce - 6 - 1;
-                        printf(".. ");
-                        continue;
-                    }
-                    const float f =
-                            flatfield->flatfield.array.ptr[ri * ce + ci];
-                    if (f >= 0.f && f < 10.f)
-                        printf("%.3f ", f != 0.f ? f : 0.f);
-                    else
-                        printf("##### ");
-                }
-            }
-            printf("\n");
-        }
+        printf("flatfield: \"%s\" ", flatfield->channel);
+        print_multidim_array(&flatfield->flatfield);
     }
     printf("flatfield_enabled: %s\n",
            msg->flatfield_enabled ? "true" : "false");
@@ -95,36 +259,8 @@ static void handle_start_msg(struct stream2_start_msg* msg) {
     printf("number_of_images: %" PRIu64 "\n", msg->number_of_images);
     for (size_t i = 0; i < msg->pixel_mask.len; i++) {
         struct stream2_pixel_mask* pixel_mask = &msg->pixel_mask.ptr[i];
-        printf("pixel_mask: \"%s\" dim [%" PRIu64 " %" PRIu64 "]\n",
-               pixel_mask->channel, pixel_mask->pixel_mask.dim[0],
-               pixel_mask->pixel_mask.dim[1]);
-        for (uint64_t ri = 0, re = pixel_mask->pixel_mask.dim[0]; ri < re; ri++)
-        {
-            if (ri == 4 && re > 9) {
-                ri = re - 4 - 1;
-                for (uint64_t ci = 0, ce = pixel_mask->pixel_mask.dim[1];
-                     ci < ce; ci++) {
-                    if (ci == 4 && ce > 9) {
-                        ci = ce - 4 - 1;
-                        printf(":: ");
-                        continue;
-                    }
-                    printf(":      : ");
-                }
-            } else {
-                for (uint64_t ci = 0, ce = pixel_mask->pixel_mask.dim[1];
-                     ci < ce; ci++) {
-                    if (ci == 4 && ce > 9) {
-                        ci = ce - 4 - 1;
-                        printf(".. ");
-                        continue;
-                    }
-                    printf("%08" PRIx32 " ",
-                           pixel_mask->pixel_mask.array.ptr[ri * ce + ci]);
-                }
-            }
-            printf("\n");
-        }
+        printf("pixel_mask: \"%s\" ", pixel_mask->channel);
+        print_multidim_array(&pixel_mask->pixel_mask);
     }
     printf("pixel_mask_enabled: %s\n",
            msg->pixel_mask_enabled ? "true" : "false");
@@ -156,32 +292,8 @@ static void handle_image_msg(struct stream2_image_msg* msg) {
            msg->stop_time[1]);
     for (size_t i = 0; i < msg->data.len; i++) {
         struct stream2_image_data* data = &msg->data.ptr[i];
-        printf("data: \"%s\" dim [%" PRIu64 " %" PRIu64 "] elem size %zu\n",
-               data->channel, data->data.dim[0], data->data.dim[1],
-               data->elem_size);
-        for (uint64_t ri = 0, re = data->data.dim[0]; ri < re; ri++) {
-            if (ri == 12 && re > 25) {
-                ri = re - 12 - 1;
-                for (uint64_t ci = 0, ce = data->data.dim[1] * data->elem_size;
-                     ci < ce; ci++) {
-                    if (ci >= 25)
-                        break;
-                    printf(":: ");
-                }
-            } else {
-                for (uint64_t ci = 0, ce = data->data.dim[1] * data->elem_size;
-                     ci < ce; ci++) {
-                    if (ci == 12 && ce > 25) {
-                        ci = ce - 12 - 1;
-                        printf(".. ");
-                        continue;
-                    }
-                    printf("%02" PRIx8 " ",
-                           ((uint8_t*)data->data.array.ptr)[ri * ce + ci]);
-                }
-            }
-            printf("\n");
-        }
+        printf("data: \"%s\" ", data->channel);
+        print_multidim_array(&data->data);
     }
 }
 

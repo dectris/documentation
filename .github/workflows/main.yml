@@ -7,7 +7,7 @@ jobs:
     strategy:
       matrix:
         build-type: [Debug, Release]
-        os: [macos-10.15, ubuntu-18.04, ubuntu-20.04, windows-2016, windows-2019]
+        os: [macos-10.15, macos-11, macos-12, ubuntu-18.04, ubuntu-20.04, ubuntu-22.04, windows-2019, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout

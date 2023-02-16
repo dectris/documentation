@@ -69,7 +69,7 @@ https://support.hdfgroup.org/services/filters/HDF5_LZ4.pdf
 
 ### Decompression
 
-`pip install cbor2 dectris-compression~=0.2.1`
+`pip install cbor2 dectris-compression~=0.2.3`
 
 ```python
 import cbor2

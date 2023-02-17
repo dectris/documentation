@@ -23,7 +23,7 @@ The tag content is an array of three elements: a text string specifying the comp
 
 This tag is equivalent to a byte string of the decompressed data. In particular, it MAY be used with tags that require data items of major type 2, as allowed by the CBOR protocol (see [Tag Equivalence]).
 
-[Tag Equivalence]: https://www.ietf.org/archive/id/draft-ietf-cbor-packed-07.html#name-tag-equivalence
+[Tag Equivalence]: https://www.ietf.org/archive/id/draft-ietf-cbor-packed-08.html#name-tag-equivalence
 
 ## Compression Algorithms
 

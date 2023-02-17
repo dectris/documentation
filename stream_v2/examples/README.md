@@ -31,7 +31,7 @@ cmake --build .
 `client.py` demonstrates how to receive and decode stream V2 data using Python 3. Fields of type `MultiDimArray` and `TypedArray` are represented as `numpy` arrays.
 
 ```sh
-pip install cbor2 dectris-compression~=0.2.3 numpy zmq
+pip install cbor2 dectris-compression~=0.2.3 numpy pyzmq
 python client.py
 ```
 

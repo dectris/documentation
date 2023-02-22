@@ -8,6 +8,5 @@ add_library(tinycbor OBJECT
     tinycbor/src/cborparser_dup_string.c
     tinycbor/src/cborpretty.c
     tinycbor/src/cborpretty_stdio.c
-    tinycbor/src/cbortojson.c
     tinycbor/src/cborvalidation.c
     )

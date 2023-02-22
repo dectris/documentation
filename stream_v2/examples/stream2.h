@@ -124,6 +124,11 @@ struct stream2_threshold_energy_map {
     size_t len;
 };
 
+struct stream2_user_data {
+    const uint8_t* ptr;
+    size_t len;
+};
+
 enum stream2_msg_type {
     STREAM2_MSG_START,
     STREAM2_MSG_IMAGE,
@@ -168,6 +173,7 @@ struct stream2_start_msg {
     char* sensor_material;
     double sensor_thickness;
     struct stream2_threshold_energy_map threshold_energy;
+    struct stream2_user_data user_data;
     bool virtual_pixel_interpolation_enabled;
 };
 
@@ -181,6 +187,7 @@ struct stream2_image_msg {
     char* series_date;
     uint64_t start_time[2];
     uint64_t stop_time[2];
+    struct stream2_user_data user_data;
     struct stream2_image_data_map data;
 };
 

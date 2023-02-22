@@ -67,4 +67,5 @@ target_link_libraries(example
     ${LIBZMQ_TARGET}
     compression
     stream2
+    tinycbor
     )

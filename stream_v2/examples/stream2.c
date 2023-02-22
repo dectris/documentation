@@ -432,6 +432,22 @@ static enum stream2_result parse_goniometer(
     return CBOR_RESULT(cbor_value_leave_container(it, &field));
 }
 
+static enum stream2_result parse_user_data(
+        CborValue* it,
+        struct stream2_user_data* user_data) {
+    enum stream2_result r;
+
+    const uint8_t* ptr = cbor_value_get_next_byte(it);
+
+    if ((r = CBOR_RESULT(cbor_value_advance(it))))
+        return r;
+
+    user_data->ptr = ptr;
+    user_data->len = cbor_value_get_next_byte(it) - ptr;
+
+    return STREAM2_OK;
+}
+
 static enum stream2_result parse_start_msg(CborValue* it,
                                            struct stream2_msg** msg_out) {
     enum stream2_result r;
@@ -668,6 +684,9 @@ static enum stream2_result parse_start_msg(CborValue* it,
 
             if ((r = CBOR_RESULT(cbor_value_leave_container(it, &field))))
                 return r;
+        } else if (strcmp(key, "user_data") == 0) {
+            if ((r = parse_user_data(it, &msg->user_data)))
+                return r;
         } else if (strcmp(key, "virtual_pixel_interpolation_enabled") == 0) {
             if ((r = parse_bool(it, &msg->virtual_pixel_interpolation_enabled)))
                 return r;
@@ -718,6 +737,9 @@ static enum stream2_result parse_image_msg(CborValue* it,
                 return r;
         } else if (strcmp(key, "stop_time") == 0) {
             if ((r = parse_array_2_uint64(it, msg->stop_time)))
+                return r;
+        } else if (strcmp(key, "user_data") == 0) {
+            if ((r = parse_user_data(it, &msg->user_data)))
                 return r;
         } else if (strcmp(key, "data") == 0) {
             if (!cbor_value_is_map(it))

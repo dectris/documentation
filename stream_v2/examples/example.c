@@ -7,6 +7,7 @@
 
 #include "compression/src/compression.h"
 #include "stream2.h"
+#include "tinycbor/src/cbor.h"
 
 static enum stream2_result decode_bytes(const struct stream2_bytes* bytes,
                                         const unsigned char** decoded,
@@ -184,6 +185,22 @@ static void print_multidim_array(
     free(buffer);
 }
 
+static void print_user_data(struct stream2_user_data* user_data) {
+    if (user_data->ptr != NULL) {
+        CborParser parser;
+        CborValue it;
+        CborError e;
+        if ((e = cbor_parser_init(user_data->ptr, user_data->len, 0, &parser,
+                                  &it)) ||
+            (e = cbor_value_to_pretty(stdout, &it)))
+        {
+            printf("error: %s\n", cbor_error_string(e));
+            return;
+        }
+    }
+    printf("\n");
+}
+
 static void handle_start_msg(struct stream2_start_msg* msg) {
     printf("\nSTART MESSAGE: series_id %" PRIu64 " series_unique_id %s\n",
            msg->series_id, msg->series_unique_id);
@@ -275,6 +292,8 @@ static void handle_start_msg(struct stream2_start_msg* msg) {
                msg->threshold_energy.ptr[i].channel,
                msg->threshold_energy.ptr[i].energy);
     }
+    printf("user_data: ");
+    print_user_data(&msg->user_data);
     printf("virtual_pixel_interpolation_enabled: %s\n",
            msg->virtual_pixel_interpolation_enabled ? "true" : "false");
 }
@@ -290,6 +309,8 @@ static void handle_image_msg(struct stream2_image_msg* msg) {
            msg->start_time[1]);
     printf("stop_time: %" PRIu64 "/%" PRIu64 "\n", msg->stop_time[0],
            msg->stop_time[1]);
+    printf("user_data: ");
+    print_user_data(&msg->user_data);
     for (size_t i = 0; i < msg->data.len; i++) {
         struct stream2_image_data* data = &msg->data.ptr[i];
         printf("data: \"%s\" ", data->channel);

@@ -24,9 +24,9 @@ static enum stream2_result decode_bytes(const struct stream2_bytes* bytes,
 
     CompressionAlgorithm algorithm;
     if (strcmp(compression.algorithm, "bslz4") == 0) {
-        algorithm = COMPRESSION_BSLZ4_HDF5;
+        algorithm = COMPRESSION_BSLZ4;
     } else if (strcmp(compression.algorithm, "lz4") == 0) {
-        algorithm = COMPRESSION_LZ4_HDF5;
+        algorithm = COMPRESSION_LZ4;
     } else {
         return STREAM2_ERROR_NOT_IMPLEMENTED;
     }

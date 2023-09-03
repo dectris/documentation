@@ -237,7 +237,7 @@ static enum stream2_result parse_dectris_compression(
     if ((r = consume_byte_string_nocopy(&elt, bstr, bstr_len, &elt)))
         return r;
 
-    // https://github.com/dectris/compression/blob/v0.2.3/src/compression.c#L42
+    // https://github.com/dectris/compression/blob/v0.3.0/src/compression.c#L46
     if (strcmp(compression->algorithm, "bslz4") == 0 ||
         strcmp(compression->algorithm, "lz4") == 0)
     {

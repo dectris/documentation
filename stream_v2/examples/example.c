@@ -83,15 +83,15 @@ static enum stream2_result decode_typed_array(
 static int print_typed_array_type(const struct stream2_typed_array* array) {
     switch (array->tag) {
         case STREAM2_TYPED_ARRAY_UINT8:
-            return printf("uint8");
+            return printf("uint8 (tag %" PRIu64 ")", array->tag);
         case STREAM2_TYPED_ARRAY_UINT16_LITTLE_ENDIAN:
-            return printf("uint16le");
+            return printf("uint16 (tag %" PRIu64 ")", array->tag);
         case STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN:
-            return printf("uint32le");
+            return printf("uint32 (tag %" PRIu64 ")", array->tag);
         case STREAM2_TYPED_ARRAY_FLOAT32_LITTLE_ENDIAN:
-            return printf("float32le");
+            return printf("float32 (tag %" PRIu64 ")", array->tag);
         default:
-            return printf("%" PRIu64, array->tag);
+            return printf("tag %" PRIu64, array->tag);
     }
 }
 

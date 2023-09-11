@@ -223,8 +223,10 @@ static void handle_start_msg(struct stream2_start_msg* msg) {
         size_t len;
         size_t elem_size;
         void* buffer;
-        if (msg->countrate_correction_lookup_table.tag !=
-            STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN)
+        if (msg->countrate_correction_lookup_table.tag == UINT64_MAX) {
+            printf("countrate_correction_lookup_table:\n");
+        } else if (msg->countrate_correction_lookup_table.tag !=
+                   STREAM2_TYPED_ARRAY_UINT32_LITTLE_ENDIAN)
         {
             printf("countrate_correction_lookup_table: error: unexpected tag "
                    "%" PRIu64 "\n",

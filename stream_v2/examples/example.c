@@ -271,6 +271,7 @@ static void handle_start_msg(struct stream2_start_msg* msg) {
     printf("goniometer: two_theta: start %f increment %f\n",
            msg->goniometer.two_theta.start,
            msg->goniometer.two_theta.increment);
+    printf("image_dtype: \"%s\"\n", msg->image_dtype ? msg->image_dtype : "");
     printf("image_size_x: %" PRIu64 "\n", msg->image_size_x);
     printf("image_size_y: %" PRIu64 "\n", msg->image_size_y);
     printf("incident_energy: %f\n", msg->incident_energy);

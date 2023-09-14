@@ -116,6 +116,7 @@ This message is sent once at the start of a series during the arm command. It co
 | &emsp;&emsp;_AXIS_ | Map | Any goniometer axis. |
 | &emsp;&emsp;&emsp;&emsp;`increment` | Float | Step increment for _AXIS_. |
 | &emsp;&emsp;&emsp;&emsp;`start` | Float | Starting value for _AXIS_. |
+| `image_dtype` | TextString | Image (pixel) data type name:<ul><li>`uint8`: 8-bit unsigned integer</li><li>`uint16`: 16-bit unsigned integer</li><li>`uint32`: 32-bit unsigned integer</li></ul> |
 | `image_size_x` | Integer | The x-size (width) of each image in pixels. |
 | `image_size_y` | Integer | The y-size (height) of each image in pixels. |
 | `incident_energy` | Float | Configured energy of incident particles (e.g. X-rays) in eV. |

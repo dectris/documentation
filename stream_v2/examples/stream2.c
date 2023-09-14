@@ -589,6 +589,9 @@ static enum stream2_result parse_start_msg(CborValue* it,
         } else if (strcmp(key, "goniometer") == 0) {
             if ((r = parse_goniometer(it, &msg->goniometer)))
                 return r;
+        } else if (strcmp(key, "image_dtype") == 0) {
+            if ((r = parse_text_string(it, &msg->image_dtype)))
+                return r;
         } else if (strcmp(key, "image_size_x") == 0) {
             if ((r = parse_uint64(it, &msg->image_size_x)))
                 return r;
@@ -901,6 +904,7 @@ static void free_start_msg(struct stream2_start_msg* msg) {
         free(msg->flatfield.ptr[i].flatfield.array.data.compression.algorithm);
     }
     free(msg->flatfield.ptr);
+    free(msg->image_dtype);
     for (size_t i = 0; i < msg->pixel_mask.len; i++) {
         free(msg->pixel_mask.ptr[i].channel);
         free(msg->pixel_mask.ptr[i]

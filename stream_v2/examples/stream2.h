@@ -160,6 +160,7 @@ struct stream2_start_msg {
     bool flatfield_enabled;
     double frame_time;
     struct stream2_goniometer goniometer;
+    char* image_dtype;
     uint64_t image_size_x;
     uint64_t image_size_y;
     double incident_energy;

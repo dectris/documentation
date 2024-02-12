@@ -7,7 +7,7 @@ This document describes CBOR tag 56500 which represents a compressed byte string
 * Tag: 56500
 * Data Item: Array (major type 4).
 * Semantics: Compressed byte string.
-* Contact: Kal Conley <<kal.conley@dectris.com>>
+* Contact: Dirk Boye <<dirk.boye@dectris.com>>
 
 ## Semantics
 

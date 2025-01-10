@@ -1,0 +1,93 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+
+  # Allows to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build_documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook
+        run: |
+          rustup update
+          cargo install mdbook
+          cargo install mdbook-katex
+      - name: Build with mdBook
+        run: |
+          mdbook build
+      - name: Upload Documentation Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: ./book
+
+  build_nexus:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout NeXus Documentation
+        uses: actions/checkout@v4
+        with:
+          repository: "nexusformat/definitions"
+          ref: "v2024.02"
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.8"
+      - name: Install NeXuS Requirements
+        run: |
+          python3 -m pip install --upgrade pip setuptools
+          make install
+          python3 -m pip list
+      - name: Install LaTeX
+        run: |
+          sudo apt-get update -y && \
+          sudo apt-get install -y \
+            latexmk \
+            texlive-latex-recommended \
+            texlive-latex-extra \
+            texlive-fonts-recommended
+          tex --version
+      - name: Build NeXus Documentation
+        run: |
+          make prepare
+          make html
+      - name: Upload NeXuS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexusformat
+          path: ./build/manual/build/html
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    needs: [build_documentation, build_nexus]
+    steps:
+      - name: Download Documentation Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: documentation
+          path: pages
+      - name: Download NeXuS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nexusformat
+          path: pages/nexusformat
+      - run: |
+          tree pages
+      - name: Upload Pages Artifacts
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

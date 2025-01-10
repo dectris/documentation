@@ -39,13 +39,13 @@ This tag is equivalent to a byte string of the decompressed data. In particular,
 #6.56500(["bslz4", 4, ...])
 ```
 
-https://github.com/kiyo-masui/bitshuffle
+<https://github.com/kiyo-masui/bitshuffle>
 
-https://github.com/kiyo-masui/bitshuffle/blob/f57e2e50cc6855d5cf7689b9bc688b3ef1dffe02/src/bshuf_h5filter.c
+<https://github.com/kiyo-masui/bitshuffle/blob/f57e2e50cc6855d5cf7689b9bc688b3ef1dffe02/src/bshuf_h5filter.c>
 
-https://lz4.github.io/lz4/
+<https://lz4.github.io/lz4/>
 
-https://github.com/lz4/lz4/blob/master/doc/lz4_Block_format.md
+<https://github.com/lz4/lz4/blob/master/doc/lz4_Block_format.md>
 
 ### LZ4 (HDF5 framing)
 
@@ -59,11 +59,11 @@ The modifier item is unused with this compression algorithm. The zero integer is
 #6.56500(["lz4", 0, ...])
 ```
 
-https://lz4.github.io/lz4/
+<https://lz4.github.io/lz4/>
 
-https://github.com/lz4/lz4/blob/master/doc/lz4_Block_format.md
+<https://github.com/lz4/lz4/blob/master/doc/lz4_Block_format.md>
 
-https://support.hdfgroup.org/services/filters/HDF5_LZ4.pdf
+<https://support.hdfgroup.org/services/filters/HDF5_LZ4.pdf>
 
 ## Example
 

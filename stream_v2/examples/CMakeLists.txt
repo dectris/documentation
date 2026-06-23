@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.11)
+cmake_minimum_required(VERSION 3.28)
 project(stream2_example)
 
 if(NOT WIN32)
@@ -8,22 +8,22 @@ else()
 endif()
 
 if(BUILD_LIBZMQ)
+    # libzmq v4.3.4 does not support CMake 4
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
     include(FetchContent)
+    set(BUILD_SHARED OFF CACHE INTERNAL "")
+    set(BUILD_STATIC ON CACHE INTERNAL "")
+    set(BUILD_TESTS OFF CACHE BOOL "")
+    set(ENABLE_CURVE OFF CACHE BOOL "")
+    set(ENABLE_DRAFTS OFF CACHE BOOL "")
     FetchContent_Declare(
         libzmq
         GIT_REPOSITORY https://github.com/zeromq/libzmq.git
         GIT_TAG 4097855ddaaa65ed7b5e8cb86d143842a594eebd # v4.3.4
-        )
-    FetchContent_GetProperties(libzmq)
-    if(NOT libzmq_POPULATED)
-        FetchContent_Populate(libzmq)
-        set(BUILD_SHARED OFF CACHE INTERNAL "")
-        set(BUILD_STATIC ON CACHE INTERNAL "")
-        set(ENABLE_CURVE OFF CACHE BOOL "")
-        set(ENABLE_DRAFTS OFF CACHE BOOL "")
-        add_subdirectory("${libzmq_SOURCE_DIR}" "${libzmq_BINARY_DIR}" EXCLUDE_FROM_ALL)
-        unset(ZEROMQ_LIBRARY CACHE)
-    endif()
+        EXCLUDE_FROM_ALL
+    )
+    FetchContent_MakeAvailable(libzmq)
+    unset(ZEROMQ_LIBRARY CACHE)
     set(LIBZMQ_TARGET libzmq-static)
 else()
     find_package(PkgConfig REQUIRED)

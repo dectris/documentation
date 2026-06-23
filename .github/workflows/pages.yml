@@ -11,7 +11,7 @@ jobs:
   build_documentation:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install mdBook
         run: |
           rustup update
@@ -21,7 +21,7 @@ jobs:
         run: |
           mdbook build
       - name: Upload Documentation Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: documentation
           path: ./book
@@ -30,12 +30,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout NeXus Documentation
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: "nexusformat/definitions"
           ref: "v2024.02"
       - name: Set up Python 3.8
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
           python-version: "3.8"
       - name: Install NeXuS Requirements
@@ -57,7 +57,7 @@ jobs:
           make prepare
           make html
       - name: Upload NeXuS Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nexusformat
           path: ./build/manual/build/html
@@ -73,21 +73,21 @@ jobs:
     needs: [build_documentation, build_nexus]
     steps:
       - name: Download Documentation Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: documentation
           path: pages
       - name: Download NeXuS Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nexusformat
           path: pages/nexusformat
       - run: |
           tree pages
       - name: Upload Pages Artifacts
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: pages
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -51,7 +51,12 @@ include_directories(
     )
 
 if(NOT "${CMAKE_C_COMPILER_ID}" MATCHES "MSVC")
-    add_compile_options(-mf16c -Wall -Wextra)
+    include(CheckCCompilerFlag)
+    check_c_compiler_flag(-mf16c COMPILER_SUPPORTS_MF16C)
+    if(COMPILER_SUPPORTS_MF16C)
+        add_compile_options(-mf16c)
+    endif()
+    add_compile_options(-Wall -Wextra)
 endif()
 
 add_library(stream2 STATIC

@@ -15,8 +15,8 @@ jobs:
       - name: Install mdBook
         run: |
           rustup update
-          cargo install mdbook
-          cargo install mdbook-katex
+          cargo install mdbook@0.4.48
+          cargo install mdbook-katex@0.9.4
       - name: Build with mdBook
         run: |
           mdbook build

@@ -63,7 +63,7 @@ The modifier item is unused with this compression algorithm. The zero integer is
 
 <https://github.com/lz4/lz4/blob/master/doc/lz4_Block_format.md>
 
-<https://support.hdfgroup.org/services/filters/HDF5_LZ4.pdf>
+<https://github.com/HDFGroup/hdf5_plugins/blob/master/LZ4/LZ4_HDF5_format.md>
 
 ## Example
 
